@@ -102,7 +102,7 @@ src/
 
 ## Remote Access
 
-The dashboard runs on `localhost:3456` by default. To expose it to the public internet, you can use [GiraffeCloud](https://giraffecloud.io) to create a secure tunnel:
+The dashboard runs on `localhost:3456` by default. To expose it to the public internet, you can use [GiraffeCloud](https://giraffecloud.xyz) to create a secure tunnel:
 
 ```bash
 # Expose your local dashboard to the internet
