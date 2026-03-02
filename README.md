@@ -102,16 +102,26 @@ src/
 
 ## Remote Access
 
-To access the dashboard from another device, use a tunnel:
+The dashboard runs on `localhost:3456` by default. To expose it to the public internet, you can use [GiraffeCloud](https://giraffecloud.io) to create a secure tunnel:
 
 ```bash
-# Example with SSH tunnel
-ssh -R 3456:localhost:3456 your-server
+# Expose your local dashboard to the internet
+grf-claude http 3456
 
-# Or use any HTTP tunnel tool that forwards port 3456
+# This gives you a public URL like https://your-subdomain.giraffecloud.io
+# that tunnels back to your local Terminal Manager
 ```
 
-Generate a share link from the dashboard to give others read-only (or interactive) access to a specific session without requiring the password.
+Alternatively, use any tunnel tool:
+
+```bash
+# SSH tunnel
+ssh -R 3456:localhost:3456 your-server
+
+# Or ngrok, cloudflared, etc.
+```
+
+Once exposed, use the **Share** button in the dashboard to generate share links. Share links provide read-only or interactive access to a specific session without requiring the dashboard password.
 
 ## License
 
