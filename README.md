@@ -104,13 +104,15 @@ src/
 
 The dashboard runs on `localhost:3456` by default. To expose it to the public internet, you can use [GiraffeCloud](https://giraffecloud.xyz) to create a secure tunnel:
 
-```bash
-# Expose your local dashboard to the internet
-grf-claude http 3456
+1. Sign up at https://giraffecloud.xyz and configure your tunnel in the dashboard (set local port to `3456`)
+2. Install the GiraffeCloud client following the [getting started guide](https://giraffecloud.xyz/dashboard/getting-started)
+3. Connect:
 
-# This gives you a public URL like https://your-subdomain.giraffecloud.io
-# that tunnels back to your local Terminal Manager
+```bash
+giraffecloud connect
 ```
+
+This gives you a public URL that tunnels back to your local Terminal Manager.
 
 Alternatively, use any tunnel tool:
 
