@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Terminal Manager — Login</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1b26;
+      color: #c0caf5;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .login-box {
+      background: #24283b;
+      border: 1px solid #3b4261;
+      border-radius: 12px;
+      padding: 40px;
+      width: 340px;
+    }
+    h1 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+    p {
+      color: #565f89;
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+    input {
+      width: 100%;
+      padding: 10px 14px;
+      background: #1a1b26;
+      border: 1px solid #3b4261;
+      border-radius: 6px;
+      color: #c0caf5;
+      font-size: 14px;
+      outline: none;
+      margin-bottom: 16px;
+    }
+    input:focus {
+      border-color: #7aa2f7;
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: #7aa2f7;
+      color: #1a1b26;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #89b4fa;
+    }
+    .error {
+      color: #f7768e;
+      font-size: 13px;
+      margin-bottom: 12px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h1>Terminal Manager</h1>
+    <p>Enter password to continue</p>
+    <div id="error" class="error">Wrong password</div>
+    <form id="form">
+      <input id="password" type="password" placeholder="Password" autofocus>
+      <button type="submit">Log in</button>
+    </form>
+  </div>
+  <script>
+    document.getElementById('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const password = document.getElementById('password').value;
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        window.location.href = '/';
+      } else {
+        document.getElementById('error').style.display = 'block';
+        document.getElementById('password').select();
+      }
+    });
+  </script>
+</body>
+</html>

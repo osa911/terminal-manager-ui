@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Terminal Manager</title>
+  <link rel="stylesheet" href="/xterm.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-theme="dark">
+  <div id="app">
+    <!-- Top Bar -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <h1>Terminal Manager</h1>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-theme" class="btn-theme" title="Toggle theme">&#9790;</button>
+        <span id="connection-status" class="status-dot status-disconnected"></span>
+        <span id="connection-text">Disconnected</span>
+        <button id="btn-new-session" class="btn btn-primary">+ New Session</button>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <div id="main">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <div class="sidebar-header">
+          <h2>Sessions</h2>
+          <span id="session-count" class="badge">0</span>
+        </div>
+        <div class="sidebar-search">
+          <input id="session-search" type="text" placeholder="Search sessions..." autocomplete="off">
+        </div>
+        <div id="session-list"></div>
+        <div id="sidebar-resize-handle"></div>
+      </aside>
+
+      <!-- Content Area -->
+      <main id="content">
+        <div id="empty-state">
+          <div class="empty-icon">&#9671;</div>
+          <h2>No session selected</h2>
+          <p>Select a session from the sidebar or create a new one</p>
+        </div>
+
+        <div id="session-view" class="hidden">
+          <!-- Session Header -->
+          <div id="session-header">
+            <div class="session-info">
+              <button id="btn-back" class="btn-back" title="Back to sessions">&#8592;</button>
+              <h2 id="session-title"></h2>
+              <span id="session-branch" class="badge badge-branch"></span>
+              <span id="session-status-badge" class="badge"></span>
+            </div>
+            <div class="session-actions">
+              <button id="btn-resume" class="btn btn-resume hidden">Resume</button>
+              <button id="btn-terminate" class="btn btn-terminate hidden">Terminate</button>
+              <button id="btn-share" class="btn btn-secondary btn-sm">Share</button>
+            </div>
+          </div>
+
+          <!-- Chat View -->
+          <div id="chat-view" class="view-panel">
+            <div id="chat-messages"></div>
+          </div>
+
+          <!-- Terminal View (for spawned sessions) -->
+          <div id="terminal-view" class="view-panel hidden">
+            <div id="terminal-container"></div>
+          </div>
+
+          <!-- Input Bar -->
+          <div id="input-bar">
+            <div id="quick-actions" class="hidden"></div>
+            <div class="input-row">
+              <textarea id="input-text" placeholder="Type a message... (Shift+Enter for new line)" autocomplete="off" rows="1"></textarea>
+              <button id="btn-send" class="btn btn-primary">Send</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- New Session Modal -->
+  <div id="modal-overlay" class="hidden">
+    <div class="modal">
+      <h2>New Session</h2>
+      <div class="form-group">
+        <label for="new-session-cwd">Working Directory</label>
+        <input id="new-session-cwd" type="text" placeholder="~/my-project" value="">
+      </div>
+      <div class="form-group">
+        <div id="folder-breadcrumb" class="folder-breadcrumb"></div>
+        <div id="folder-list" class="folder-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-modal-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="btn-modal-create" class="btn btn-primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Share Modal -->
+  <div id="share-modal-overlay" class="hidden">
+    <div class="modal">
+      <h2>Share Session</h2>
+      <div class="form-group">
+        <label>
+          <input id="share-interactive" type="checkbox"> Allow interactive access
+        </label>
+      </div>
+      <div id="share-url-group" class="form-group hidden">
+        <label>Share URL</label>
+        <div class="input-row">
+          <input id="share-url" type="text" readonly>
+          <button id="btn-copy-share" class="btn btn-secondary btn-sm">Copy</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-share-cancel" class="btn btn-secondary">Cancel</button>
+        <button id="btn-share-generate" class="btn btn-primary">Generate Link</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
