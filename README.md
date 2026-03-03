@@ -127,7 +127,10 @@ Once exposed, use the **Share** button in the dashboard to generate share links.
 
 ## Screenshots
 
-Questions from AI
+main UI
+<img width="1892" height="2078" alt="CleanShot 2026-03-03 at 12 29 05@2x" src="https://github.com/user-attachments/assets/cc1c823d-16c1-491a-a660-acaaa3df0e39" />
+
+questions from AI
 <img width="1582" height="846" alt="CleanShot 2026-03-03 at 10 28 58@2x" src="https://github.com/user-attachments/assets/a0429650-7539-440f-9d91-6238ca4af712" />
 
 
