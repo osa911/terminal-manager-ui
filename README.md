@@ -125,6 +125,12 @@ ssh -R 3456:localhost:3456 your-server
 
 Once exposed, use the **Share** button in the dashboard to generate share links. Share links provide read-only or interactive access to a specific session without requiring the dashboard password.
 
+## Screenshots
+
+Questions from AI
+<img width="1582" height="846" alt="CleanShot 2026-03-03 at 10 28 58@2x" src="https://github.com/user-attachments/assets/a0429650-7539-440f-9d91-6238ca4af712" />
+
+
 ## License
 
 MIT
