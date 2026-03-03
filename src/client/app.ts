@@ -1,5 +1,6 @@
 import { ChatView, ChatMessage, setOnAnswerCallback } from './chat-view';
 import { TerminalView } from './terminal-view';
+import { playDoneChime, playAttentionSound } from './sounds';
 
 // ── Types (mirror server types) ──
 interface Session {
@@ -15,6 +16,7 @@ interface Session {
   claudeSessionId?: string;
   status: 'active' | 'idle' | 'attention' | 'dead' | 'terminated';
   attentionReason?: string;
+  statusText?: string;
   lastActivity: number;
   startedAt?: number;
   summary?: string;
@@ -51,18 +53,29 @@ const sessionView = $('session-view');
 const sessionTitle = $('session-title');
 const sessionBranch = $('session-branch');
 const sessionStatusBadge = $('session-status-badge');
+const chatStatusBar = $('chat-status-bar');
 const inputText = $('input-text') as HTMLTextAreaElement;
 const quickActions = $('quick-actions');
 const connectionStatus = $('connection-status');
 const connectionText = $('connection-text');
 
 // ── WebSocket ──
+let reconnectDelay = 1000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
 function connect(): void {
+  // Prevent duplicate connect attempts
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = shareToken ? `?share=${shareToken}` : '';
   ws = new WebSocket(`${protocol}//${location.host}${params}`);
 
   ws.onopen = () => {
+    reconnectDelay = 1000; // Reset backoff on successful connect
     connectionStatus.className = 'status-dot status-connected';
     connectionText.textContent = 'Connected';
 
@@ -74,12 +87,12 @@ function connect(): void {
 
   ws.onclose = () => {
     connectionStatus.className = 'status-dot status-disconnected';
-    connectionText.textContent = 'Disconnected';
-    // Auto-reconnect
-    setTimeout(connect, 2000);
+    connectionText.textContent = `Reconnecting (${Math.round(reconnectDelay / 1000)}s)...`;
+    scheduleReconnect();
   };
 
   ws.onerror = () => {
+    // onclose will fire after this — it handles reconnect
     ws?.close();
   };
 
@@ -87,6 +100,16 @@ function connect(): void {
     const msg = JSON.parse(event.data) as ServerMessage;
     handleServerMessage(msg);
   };
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimer) return; // Already scheduled
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, reconnectDelay);
+  // Exponential backoff: 1s → 2s → 4s → 8s → max 10s
+  reconnectDelay = Math.min(reconnectDelay * 2, 10000);
 }
 
 function send(msg: Record<string, unknown>): void {
@@ -116,10 +139,22 @@ function handleServerMessage(msg: ServerMessage | { type: 'access-level'; canEdi
       applyEditMode();
       break;
     case 'sessions-update': {
+      // Detect active → idle transitions for done chime
+      const prevSessions = sessions;
+
       // If we were viewing a terminated session that just got resumed,
       // switch to the new spawned session
       const prev = selectedSessionId;
       sessions = msg.sessions;
+
+      // Play done chime when any session goes active → idle
+      for (const s of sessions) {
+        const old = prevSessions.find(p => p.id === s.id);
+        if (old?.status === 'active' && s.status === 'idle') {
+          playDoneChime();
+          break; // one chime is enough
+        }
+      }
 
       if (prev && !sessions.find(s => s.id === prev)) {
         // Our selected session was replaced — find the resumed one
@@ -170,6 +205,9 @@ function handleServerMessage(msg: ServerMessage | { type: 'access-level'; canEdi
 }
 
 function handleAttention(sessionId: string, reason: string): void {
+  // Play attention sound
+  playAttentionSound();
+
   // Update session status
   const session = sessions.find(s => s.id === sessionId);
   if (session) {
@@ -340,6 +378,9 @@ function updateSessionHeader(): void {
   sessionStatusBadge.style.background = getStatusColor(session.status);
   sessionStatusBadge.style.color = '#fff';
 
+  // Update chat status bar
+  updateChatStatusBar(session);
+
   // Show/hide resume button (hidden in share view)
   const btnResume = $('btn-resume') as HTMLButtonElement;
   if (!isSharedView && session.type === 'terminated' && session.claudeSessionId) {
@@ -408,10 +449,16 @@ function selectSession(sessionId: string): void {
     $('chat-view').classList.add('hidden');
     $('terminal-view').classList.remove('hidden');
     $('input-bar').classList.add('hidden');
-    terminalView.initInteractive(
-      (data) => send({ type: 'send-input', sessionId, text: data }),
-      (cols, rows) => send({ type: 'resize', sessionId, cols, rows }),
-    );
+    if (!terminalView.isActive()) {
+      // First time or after destroy — initialize fresh
+      terminalView.initInteractive(
+        (data) => send({ type: 'send-input', sessionId, text: data }),
+        (cols, rows) => send({ type: 'resize', sessionId, cols, rows }),
+      );
+    } else {
+      // Already initialized — just refit after showing
+      terminalView.fit();
+    }
   } else {
     // Discovered/terminated session: show chat view
     $('chat-view').classList.remove('hidden');
@@ -419,7 +466,6 @@ function selectSession(sessionId: string): void {
     if (isEditMode) {
       $('input-bar').classList.remove('hidden');
     }
-    terminalView.destroy();
     chatView.clear();
   }
 }
@@ -430,7 +476,6 @@ function goBack(): void {
   selectedSessionId = null;
   sessionView.classList.add('hidden');
   emptyState.classList.remove('hidden');
-  terminalView.destroy();
   renderSessionList();
 }
 
@@ -577,9 +622,24 @@ async function loadDirectory(dirPath: string): Promise<void> {
 }
 
 // ── Modals ──
-function showNewSessionModal(): void {
+let defaultCwd: string | null = null;
+
+async function fetchDefaultCwd(): Promise<string> {
+  if (defaultCwd) return defaultCwd;
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    defaultCwd = data.defaultCwd || '/';
+  } catch {
+    defaultCwd = '/';
+  }
+  return defaultCwd;
+}
+
+async function showNewSessionModal(): Promise<void> {
   $('modal-overlay').classList.remove('hidden');
-  loadDirectory('~');
+  const cwd = await fetchDefaultCwd();
+  loadDirectory(cwd);
   ($('new-session-cwd') as HTMLInputElement).focus();
 }
 
@@ -673,6 +733,30 @@ function getStatusColor(status: string): string {
   }
 }
 
+function updateChatStatusBar(session: Session): void {
+  if (session.type === 'terminated' || session.status === 'dead') {
+    chatStatusBar.classList.add('hidden');
+    return;
+  }
+
+  chatStatusBar.classList.remove('hidden');
+
+  let label: string;
+  if (session.status === 'active') {
+    // Show real Claude status line if available, otherwise generic
+    label = session.statusText || 'Claude is working...';
+  } else if (session.status === 'attention') {
+    label = session.attentionReason || 'Needs attention';
+  } else {
+    label = 'Waiting for input';
+  }
+
+  chatStatusBar.innerHTML = `
+    <span class="status-icon ${session.status}"></span>
+    <span class="status-text ${session.status}">${escapeHtml(label)}</span>
+  `;
+}
+
 // ── Sidebar resize ──
 function initSidebarResize(): void {
   const sidebar = $('sidebar');
@@ -708,23 +792,61 @@ function initSidebarResize(): void {
 }
 
 // ── Theme ──
+function getSystemTheme(): 'dark' | 'light' {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(theme: string): void {
+  document.body.setAttribute('data-theme', theme);
+}
+
 function initTheme(): void {
-  const saved = localStorage.getItem('theme') || 'dark';
-  document.body.setAttribute('data-theme', saved);
+  const saved = localStorage.getItem('theme'); // null = auto (follow system)
+
+  if (saved) {
+    applyTheme(saved);
+  } else {
+    applyTheme(getSystemTheme());
+  }
   updateThemeButton(saved);
 
+  // Listen for system theme changes (only applies when in auto mode)
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!localStorage.getItem('theme')) {
+      applyTheme(getSystemTheme());
+      updateThemeButton(null);
+    }
+  });
+
   $('btn-theme').addEventListener('click', () => {
-    const current = document.body.getAttribute('data-theme') || 'dark';
-    const next = current === 'dark' ? 'light' : 'dark';
-    document.body.setAttribute('data-theme', next);
-    localStorage.setItem('theme', next);
-    updateThemeButton(next);
+    const saved = localStorage.getItem('theme');
+    if (!saved) {
+      // Auto → opposite of current system theme
+      const override = getSystemTheme() === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('theme', override);
+      applyTheme(override);
+      updateThemeButton(override);
+    } else {
+      // Override → back to auto
+      localStorage.removeItem('theme');
+      applyTheme(getSystemTheme());
+      updateThemeButton(null);
+    }
   });
 }
 
-function updateThemeButton(theme: string): void {
-  // Moon for dark, sun for light
-  $('btn-theme').innerHTML = theme === 'dark' ? '&#9790;' : '&#9728;';
+function updateThemeButton(theme: string | null): void {
+  if (!theme) {
+    // Auto mode — show auto icon
+    $('btn-theme').innerHTML = '&#9683;'; // ◓ half circle
+    $('btn-theme').title = 'Theme: auto (following system)';
+  } else if (theme === 'dark') {
+    $('btn-theme').innerHTML = '&#9790;'; // ☾ moon
+    $('btn-theme').title = 'Theme: dark (click for auto)';
+  } else {
+    $('btn-theme').innerHTML = '&#9728;'; // ☀ sun
+    $('btn-theme').title = 'Theme: light (click for auto)';
+  }
 }
 
 // ── Event listeners ──

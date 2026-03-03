@@ -1,9 +1,12 @@
-import { execFile } from 'child_process';
+import { execFile as execFileCb } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Session, ITermSession, JsonlEntry, JsonlContentBlock } from './types';
-import { enumerateSessions } from './iterm-bridge';
+import { TerminalBridge } from './terminal-bridge';
 import { JsonlWatcher } from './jsonl-watcher';
+
+const execFileAsync = promisify(execFileCb);
 
 const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -14,84 +17,136 @@ interface ProcessInfo {
   startTime: string;
 }
 
-function findClaudeProcesses(): Promise<ProcessInfo[]> {
-  return new Promise((resolve) => {
-    // Use -eo for precise column parsing: pid, tty, args
-    execFile('ps', ['-eo', 'pid,tty,args'], (err, stdout) => {
-      if (err) {
-        resolve([]);
-        return;
-      }
-
-      const processes: ProcessInfo[] = [];
-      const lines = stdout.split('\n').slice(1); // skip header
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        // Parse: PID TTY ARGS
-        const match = trimmed.match(/^(\d+)\s+([\w/]+|\?\?)\s+(.+)$/);
-        if (!match) continue;
-
-        const pid = parseInt(match[1], 10);
-        const tty = match[2];
-        const args = match[3];
-
-        // Only match "claude" CLI processes:
-        // - Must be on a real TTY (not "??" which are background/subagent processes)
-        // - Must be the claude binary directly (not Claude.app, not shell scripts)
-        // - Exclude our own server
-        if (tty === '??' || tty === '-') continue;
-        if (args.includes('terminal-manager')) continue;
-        if (args.includes('Claude.app')) continue;
-
-        // Match: "claude", "claude --resume ...", "/path/to/claude ..."
-        const isClaudeCli = /^(claude(\s|$)|.*\/claude(\s|$))/.test(args);
-        if (!isClaudeCli) continue;
-
-        processes.push({ pid, tty, args, startTime: '' });
-      }
-
-      resolve(processes);
-    });
-  });
-}
-
 interface PidInfo {
   cwd: string | null;
   claudeSessionId: string | null;
 }
 
+interface SessionSummary {
+  summary: string;
+  cwd?: string;
+  branch?: string;
+  sessionId?: string;
+  startedAt?: number;
+  lastActivity?: number;
+}
+
+function normalizeTtyPath(tty: string): string {
+  return tty.startsWith('/dev/') ? tty : `/dev/${tty}`;
+}
+
+async function findClaudeProcesses(): Promise<ProcessInfo[]> {
+  try {
+    // Use -eo for precise column parsing: pid, tty, args
+    const { stdout } = await execFileAsync('ps', ['-eo', 'pid,tty,args']);
+    const processes: ProcessInfo[] = [];
+    const lines = stdout.split('\n').slice(1); // skip header
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      // Parse: PID TTY ARGS
+      const match = trimmed.match(/^(\d+)\s+([\w/]+|\?\?)\s+(.+)$/);
+      if (!match) continue;
+
+      const pid = parseInt(match[1], 10);
+      const tty = match[2];
+      const args = match[3];
+
+      // Only match "claude" CLI processes:
+      // - Must be on a real TTY (not "??" which are background/subagent processes)
+      // - Must be the claude binary directly (not Claude.app, not shell scripts)
+      // - Exclude our own server
+      if (tty === '??' || tty === '-') continue;
+      if (args.includes('terminal-manager')) continue;
+      if (args.includes('Claude.app')) continue;
+
+      // Match: "claude", "claude --resume ...", "/path/to/claude ..."
+      const isClaudeCli = /^(claude(\s|$)|.*\/claude(\s|$))/.test(args);
+      if (!isClaudeCli) continue;
+
+      processes.push({ pid, tty, args, startTime: '' });
+    }
+
+    return processes;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get process info using lsof (macOS).
+ */
+async function getProcessInfoLsof(pid: number): Promise<PidInfo> {
+  try {
+    const { stdout } = await execFileAsync('lsof', ['-p', pid.toString(), '-Fn'], { timeout: 5000 });
+
+    let cwd: string | null = null;
+    let claudeSessionId: string | null = null;
+    const lines = stdout.split('\n');
+
+    for (let i = 0; i < lines.length; i++) {
+      // Extract cwd
+      if (lines[i] === 'fcwd' && i + 1 < lines.length && lines[i + 1].startsWith('n')) {
+        cwd = lines[i + 1].slice(1);
+      }
+      // Extract session ID from open .claude/tasks/<uuid> directory
+      if (lines[i].startsWith('n')) {
+        const taskMatch = lines[i].match(/\.claude\/tasks\/([0-9a-f-]{36})/);
+        if (taskMatch) {
+          claudeSessionId = taskMatch[1];
+        }
+      }
+    }
+
+    return { cwd, claudeSessionId };
+  } catch {
+    return { cwd: null, claudeSessionId: null };
+  }
+}
+
+/**
+ * Get process info using /proc filesystem (Linux).
+ */
+function getProcessInfoProc(pid: number): PidInfo {
+  let cwd: string | null = null;
+  let claudeSessionId: string | null = null;
+
+  try {
+    cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    // Process may have exited or we lack permission
+  }
+
+  // Scan /proc/PID/fd/* symlinks for .claude/tasks/<uuid>
+  try {
+    const fdDir = `/proc/${pid}/fd`;
+    const fds = fs.readdirSync(fdDir);
+    for (const fd of fds) {
+      try {
+        const target = fs.readlinkSync(path.join(fdDir, fd));
+        const taskMatch = target.match(/\.claude\/tasks\/([0-9a-f-]{36})/);
+        if (taskMatch) {
+          claudeSessionId = taskMatch[1];
+          break;
+        }
+      } catch {
+        // Skip unreadable fd symlinks
+      }
+    }
+  } catch {
+    // /proc/PID/fd may not be readable
+  }
+
+  return { cwd, claudeSessionId };
+}
+
 function getProcessInfo(pid: number): Promise<PidInfo> {
-  return new Promise((resolve) => {
-    execFile('lsof', ['-p', pid.toString(), '-Fn'], { timeout: 5000 }, (err, stdout) => {
-      if (err) {
-        resolve({ cwd: null, claudeSessionId: null });
-        return;
-      }
-
-      let cwd: string | null = null;
-      let claudeSessionId: string | null = null;
-      const lines = stdout.split('\n');
-
-      for (let i = 0; i < lines.length; i++) {
-        // Extract cwd
-        if (lines[i] === 'fcwd' && i + 1 < lines.length && lines[i + 1].startsWith('n')) {
-          cwd = lines[i + 1].slice(1);
-        }
-        // Extract session ID from open .claude/tasks/<uuid> directory
-        if (lines[i].startsWith('n')) {
-          const taskMatch = lines[i].match(/\.claude\/tasks\/([0-9a-f-]{36})/);
-          if (taskMatch) {
-            claudeSessionId = taskMatch[1];
-          }
-        }
-      }
-
-      resolve({ cwd, claudeSessionId });
-    });
-  });
+  if (process.platform === 'linux') {
+    return Promise.resolve(getProcessInfoProc(pid));
+  }
+  return getProcessInfoLsof(pid);
 }
 
 function extractProjectName(cwd: string): string {
@@ -114,11 +169,11 @@ function extractBranch(cwd: string): string | null {
       headPath = path.join(gitPath, 'HEAD');
     }
 
-    const content = fs.readFileSync(headPath, 'utf-8').trim();
-    if (content.startsWith('ref: refs/heads/')) {
-      return content.replace('ref: refs/heads/', '');
+    const headContent = fs.readFileSync(headPath, 'utf-8').trim();
+    if (headContent.startsWith('ref: refs/heads/')) {
+      return headContent.replace('ref: refs/heads/', '');
     }
-    return content.slice(0, 8); // Short hash for detached HEAD
+    return headContent.slice(0, 8); // Short hash for detached HEAD
   } catch {
     return null;
   }
@@ -131,22 +186,19 @@ function matchTtyToIterm(
   if (!processTty || processTty === '??') return undefined;
 
   // ps -eo tty shows "ttys000", iTerm2 shows "/dev/ttys000"
-  const normalizedTty = processTty.startsWith('/dev/')
-    ? processTty
-    : `/dev/${processTty}`;
-
+  const normalizedTty = normalizeTtyPath(processTty);
   return itermSessions.find(s => s.tty === normalizedTty);
 }
 
 /**
  * Extract a short summary from JSONL by finding the first user message text.
  */
-function extractSessionSummary(jsonlPath: string): { summary: string; cwd?: string; branch?: string; sessionId?: string; startedAt?: number; lastActivity?: number } {
-  const result: { summary: string; cwd?: string; branch?: string; sessionId?: string; startedAt?: number; lastActivity?: number } = { summary: '' };
+function extractSessionSummary(jsonlPath: string): SessionSummary {
+  const result: SessionSummary = { summary: '' };
 
   try {
-    const content = fs.readFileSync(jsonlPath, 'utf-8');
-    const lines = content.split('\n').filter(Boolean);
+    const fileContent = fs.readFileSync(jsonlPath, 'utf-8');
+    const lines = fileContent.split('\n').filter(Boolean);
 
     let firstTimestamp: number | undefined;
     let lastTimestamp: number | undefined;
@@ -175,11 +227,11 @@ function extractSessionSummary(jsonlPath: string): { summary: string; cwd?: stri
 
         // Extract first user message as summary
         if (!result.summary && entry.type === 'user' && entry.message?.content) {
-          const content = entry.message.content;
-          if (typeof content === 'string') {
-            result.summary = content.slice(0, 120);
-          } else if (Array.isArray(content)) {
-            const textBlock = (content as JsonlContentBlock[]).find(b => b.type === 'text' && b.text);
+          const msgContent = entry.message.content;
+          if (typeof msgContent === 'string') {
+            result.summary = msgContent.slice(0, 120);
+          } else if (Array.isArray(msgContent)) {
+            const textBlock = (msgContent as JsonlContentBlock[]).find(b => b.type === 'text' && b.text);
             if (textBlock?.text) {
               result.summary = textBlock.text.slice(0, 120);
             }
@@ -201,7 +253,7 @@ function extractSessionSummary(jsonlPath: string): { summary: string; cwd?: stri
 
 /**
  * Decode a Claude project directory name back to a filesystem path.
- * e.g. "-Users-john-Documents-myproject" → "/Users/john/Documents/myproject"
+ * e.g. "-Users-john-Documents-myproject" -> "/Users/john/Documents/myproject"
  */
 function decodeProjectPath(dirname: string): string {
   // Replace leading dash with / and all other dashes with /
@@ -279,11 +331,16 @@ function discoverTerminatedSessions(runningSessionIds: Set<string>): Session[] {
   return sessions;
 }
 
-export async function discoverSessions(jsonlWatcher: JsonlWatcher): Promise<Session[]> {
+export async function discoverSessions(jsonlWatcher: JsonlWatcher, bridge: TerminalBridge, excludePids?: Set<number>): Promise<Session[]> {
   const [processes, itermSessions] = await Promise.all([
     findClaudeProcesses(),
-    enumerateSessions(),
+    bridge.enumerateSessions(),
   ]);
+
+  // Filter out PIDs already managed by pty-manager
+  const filtered = excludePids
+    ? processes.filter(p => !excludePids.has(p.pid))
+    : processes;
 
   const activeSessions: Session[] = [];
   const runningSessionIds = new Set<string>();
@@ -292,7 +349,7 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher): Promise<Sess
 
   // First pass: gather process info for all processes in parallel
   const processInfos = await Promise.all(
-    processes.map(async (proc) => ({
+    filtered.map(async (proc) => ({
       proc,
       info: await getProcessInfo(proc.pid),
     }))
@@ -357,6 +414,14 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher): Promise<Sess
 
     // Status will be set by AttentionDetector (reads terminal content).
     // Default to idle; the detector updates to active/attention as needed.
+    // Use JSONL file mtime for lastActivity (not Date.now() which would confuse the detector)
+    let lastActivity = 0;
+    if (jsonlPath) {
+      try {
+        lastActivity = fs.statSync(jsonlPath).mtimeMs;
+      } catch { /* ignore */ }
+    }
+
     const session: Session = {
       id: itermSession?.id || `pid-${proc.pid}`,
       type: 'discovered',
@@ -370,7 +435,7 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher): Promise<Sess
       jsonlPath: jsonlPath || undefined,
       claudeSessionId,
       status: 'idle',
-      lastActivity: Date.now(),
+      lastActivity,
     };
 
     activeSessions.push(session);

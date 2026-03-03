@@ -1,13 +1,14 @@
 # Terminal Manager UI
 
-A web dashboard for monitoring and managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) terminal sessions. Built for developers who run several Claude Code instances across iTerm2 tabs and need visibility into what each session is doing.
+A web dashboard for monitoring and managing multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) terminal sessions. Built for developers who run several Claude Code instances and need visibility into what each session is doing.
 
-![Status](https://img.shields.io/badge/platform-macOS-blue)
+![Status](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-green)
 
 ## Features
 
-- **Session Discovery** — automatically finds running Claude Code processes and matches them with iTerm2 tabs and JSONL transcript files
+- **Cross-Platform** — works on macOS (any terminal) and Linux; full feature set with iTerm2, graceful fallback without
+- **Session Discovery** — automatically finds running Claude Code processes, matches them with iTerm2 tabs (when available), and locates JSONL transcript files
 - **Live Status** — real-time active/idle/attention indicators based on JSONL file activity
 - **Chat View** — renders Claude Code conversation history with markdown support (headers, code blocks, tables, lists, links)
 - **Attention Detection** — detects when a session needs user input (permission prompts, confirmation dialogs, questions) and sends browser notifications
@@ -30,18 +31,18 @@ Browser (localhost:3456)
     WebSocket
         │
 Node.js Server
-├── iTerm2 Bridge (AppleScript — enumerate, read, write)
+├── Terminal Bridge (ItermBridge or GenericBridge — platform-detected)
 ├── JSONL Watcher (chokidar — ~/.claude/projects/*/*.jsonl)
-├── Attention Detector (periodic mtime check + terminal pattern matching)
+├── Attention Detector (hooks + CPU + terminal content)
 └── PTY Manager (node-pty — spawn new Claude processes)
 ```
 
 ## Requirements
 
-- **macOS** (uses iTerm2 AppleScript integration)
+- **macOS** or **Linux**
 - **Node.js** >= 20
-- **iTerm2** (for existing session discovery)
 - **Claude Code CLI** installed
+- **iTerm2** (optional, macOS only — enables terminal content reading and richer status detection)
 
 ## Quick Start
 
@@ -49,11 +50,15 @@ Node.js Server
 # Install dependencies
 npm install
 
+# Configure password
+cp .env.example .env
+# Edit .env and set your password
+
 # Build client + server
 npm run build
 
 # Start the server
-TM_PASSWORD=yourpassword npm start
+npm start
 ```
 
 Open [http://localhost:3456](http://localhost:3456) and enter your password.
@@ -69,12 +74,29 @@ npm run build:client   # esbuild bundles src/client → dist/public
 npm run build:server   # tsc compiles src/server → dist/server
 ```
 
-### Environment Variables
+### Configuration
+
+Copy the example env file and set your values:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` to configure:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TM_PASSWORD` | `admin` | Password for the login page |
+| `TM_DEFAULT_CWD` | `~` | Default directory for the "New Session" folder browser. Set this to your project root so new Claude sessions start in the right place. |
+| `CLAUDE_PATH` | `~/.local/bin/claude` | Path to the Claude Code CLI binary (useful if installed elsewhere) |
 | `PORT` | `3456` | Server port (hardcoded, change in `src/server/index.ts`) |
+
+Example `.env`:
+
+```bash
+TM_PASSWORD=mysecretpassword
+TM_DEFAULT_CWD=/home/user/my-project
+```
 
 ## Project Structure
 
@@ -82,8 +104,11 @@ npm run build:server   # tsc compiles src/server → dist/server
 src/
 ├── server/
 │   ├── index.ts                # Express + WebSocket server
+│   ├── platform.ts             # Detect darwin-iterm / darwin / linux
+│   ├── terminal-bridge.ts      # TerminalBridge interface + factory
+│   ├── iterm-bridge.ts         # iTerm2 AppleScript bridge (macOS)
+│   ├── generic-bridge.ts       # Cross-platform fallback (TTY write)
 │   ├── session-discovery.ts    # Find running Claude processes
-│   ├── iterm-bridge.ts         # iTerm2 AppleScript integration
 │   ├── jsonl-watcher.ts        # Watch & parse JSONL transcripts
 │   ├── attention-detector.ts   # Detect sessions needing input
 │   ├── pty-manager.ts          # Spawn new Claude sessions
@@ -98,6 +123,25 @@ src/
 ├── build.js                    # esbuild script for client bundling
 ├── tsconfig.json
 └── package.json
+```
+
+## Cross-Platform Support
+
+The server detects the platform at startup and selects the appropriate terminal bridge:
+
+| Feature | macOS + iTerm2 | macOS (other terminal) | Linux |
+|---------|---------------|----------------------|-------|
+| Session discovery | `ps` + iTerm2 | `ps` only | `ps` + `/proc` |
+| Status detection | hooks + CPU + terminal content | hooks + CPU | hooks + CPU |
+| Status text (e.g. "Compacting...") | from terminal | n/a | n/a |
+| Send input to sessions | iTerm2 AppleScript | direct TTY write | direct TTY write |
+| Chat view (JSONL) | yes | yes | yes |
+| Spawned sessions (PTY) | yes | yes | yes |
+
+The startup log shows which bridge was selected:
+
+```
+Platform: darwin-iterm, bridge: ItermBridge
 ```
 
 ## Remote Access

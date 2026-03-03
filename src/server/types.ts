@@ -12,6 +12,8 @@ export interface Session {
   claudeSessionId?: string;
   status: 'active' | 'idle' | 'attention' | 'dead' | 'terminated';
   attentionReason?: string;
+  /** Real-time Claude status line extracted from terminal (e.g. "✽ Compacting conversation…") */
+  statusText?: string;
   lastActivity: number;
   startedAt?: number;
   /** First user message text (summary) */

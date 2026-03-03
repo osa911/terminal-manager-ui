@@ -4,3 +4,4 @@ dist/
 session-names.json
 share-tokens.json
 .claude/
+.env

@@ -1,11 +1,14 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { Session } from './types';
-import { getSessionContentByTty } from './iterm-bridge';
-import { JsonlWatcher } from './jsonl-watcher';
+import { TerminalBridge } from './terminal-bridge';
 
-const CHECK_INTERVAL = 1000; // How often to check all sessions
-const ACTIVE_THRESHOLD = 2000; // Consider idle if JSONL file unchanged for this long
+const CHECK_INTERVAL = 1500;
+const TERMINAL_INFO_INTERVAL = 3000;
+const HOOK_STATUS_DIR = '/tmp/claude-status';
+const CPU_ACTIVE_THRESHOLD = 15;
+const ACTIVE_COOLDOWN = 12000;
 
 const ATTENTION_PATTERNS = [
   { pattern: /\?\s*\(y\)es\s*\(n\)o/i, reason: 'Permission prompt' },
@@ -19,60 +22,157 @@ const ATTENTION_PATTERNS = [
 ];
 
 export class AttentionDetector extends EventEmitter {
-  private checkTimer: NodeJS.Timeout | null = null;
+  private statusTimer: NodeJS.Timeout | null = null;
+  private terminalInfoTimer: NodeJS.Timeout | null = null;
   private getSessionsFn: (() => Session[]) | null = null;
+  private bridge: TerminalBridge | null = null;
+  private lastActiveTime = new Map<string, number>();
 
-  /**
-   * Periodically check all sessions' JSONL file mtime.
-   * If the file was recently modified → active.
-   * If not → check terminal for attention patterns → idle.
-   */
-  start(getSessionsFn: () => Session[], _jsonlWatcher: JsonlWatcher): void {
+  start(getSessionsFn: () => Session[], bridge: TerminalBridge): void {
     this.getSessionsFn = getSessionsFn;
+    this.bridge = bridge;
 
-    this.checkTimer = setInterval(() => {
-      this.checkAllSessions();
+    this.statusTimer = setInterval(() => {
+      this.checkStatus();
     }, CHECK_INTERVAL);
-  }
 
-  stop(): void {
-    if (this.checkTimer) {
-      clearInterval(this.checkTimer);
-      this.checkTimer = null;
+    // Only start terminal content polling when the bridge can read content
+    if (bridge.supportsContentReading) {
+      this.terminalInfoTimer = setInterval(() => {
+        this.updateTerminalInfo();
+      }, TERMINAL_INFO_INTERVAL);
     }
   }
 
-  private checkAllSessions(): void {
-    if (!this.getSessionsFn) return;
-    const sessions = this.getSessionsFn();
-    const now = Date.now();
+  stop(): void {
+    if (this.statusTimer) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = null;
+    }
+    if (this.terminalInfoTimer) {
+      clearInterval(this.terminalInfoTimer);
+      this.terminalInfoTimer = null;
+    }
+  }
 
-    for (const session of sessions) {
-      if (session.type !== 'discovered' && session.type !== 'spawned') continue;
-      if (session.status === 'dead' || session.status === 'terminated') continue;
-
-      // Check JSONL file mtime to determine if actively writing
-      let lastModified = 0;
-      if (session.jsonlPath) {
-        try {
-          const stat = fs.statSync(session.jsonlPath);
-          lastModified = stat.mtimeMs;
-        } catch {
-          // File might not exist
+  private static getCpuBatch(pids: number[]): Map<number, number> {
+    if (pids.length === 0) return new Map();
+    try {
+      const output = execSync(`ps -o pid=,%cpu= -p ${pids.join(',')}`, {
+        encoding: 'utf-8',
+        timeout: 3000,
+      });
+      const result = new Map<number, number>();
+      for (const line of output.trim().split('\n')) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          result.set(parseInt(parts[0]), parseFloat(parts[1]));
         }
       }
+      return result;
+    } catch {
+      return new Map();
+    }
+  }
 
-      const isRecentlyActive = (now - lastModified) < ACTIVE_THRESHOLD;
+  /**
+   * Read hook-written status file for a Claude session.
+   * Returns 'active' | 'idle' | 'attention' | null (no file = no hook data yet)
+   */
+  private static readHookStatus(claudeSessionId: string): string | null {
+    try {
+      return fs.readFileSync(`${HOOK_STATUS_DIR}/${claudeSessionId}`, 'utf-8').trim();
+    } catch {
+      return null;
+    }
+  }
+
+  private static stripAnsi(text: string): string {
+    // eslint-disable-next-line no-control-regex
+    return text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+  }
+
+  /**
+   * Fast status check (1.5s) using hooks + CPU + isProcessing.
+   *
+   * Hook priority (hooks are the most reliable signal):
+   * 1. hookStatus === 'attention' -> attention (permission/elicitation prompt)
+   * 2. hookStatus === 'idle' -> idle (trust hook, ignore CPU/isProcessing)
+   * 3. hookStatus === 'active' -> active
+   * 4. hookStatus === null -> fallback to CPU/isProcessing + cooldown
+   */
+  private async checkStatus(): Promise<void> {
+    if (!this.getSessionsFn) return;
+    const sessions = this.getSessionsFn();
+
+    const liveSessions = sessions.filter(
+      s => (s.type === 'discovered' || s.type === 'spawned')
+        && s.status !== 'dead' && s.status !== 'terminated'
+    );
+
+    const pids = liveSessions.filter(s => s.pid).map(s => s.pid!);
+    const [itermSessions, cpuMap] = await Promise.all([
+      this.bridge!.enumerateSessions(),
+      Promise.resolve(AttentionDetector.getCpuBatch(pids)),
+    ]);
+    const itermByTty = new Map(itermSessions.map(s => [s.tty, s]));
+
+    const now = Date.now();
+
+    for (const session of liveSessions) {
       const prevStatus = session.status;
+      const ttyPath = session.tty
+        ? (session.tty.startsWith('/dev/') ? session.tty : `/dev/${session.tty}`)
+        : null;
 
-      if (isRecentlyActive) {
+      // Signal 1 (primary): Hook status file written by Claude Code hooks
+      const hookStatus = session.claudeSessionId
+        ? AttentionDetector.readHookStatus(session.claudeSessionId)
+        : null;
+
+      // Signal 2: iTerm2 isProcessing
+      const itermInfo = ttyPath ? itermByTty.get(ttyPath) : null;
+      const isTerminalBusy = itermInfo?.isProcessing ?? false;
+
+      // Signal 3: CPU usage
+      const cpu = session.pid ? (cpuMap.get(session.pid) ?? 0) : 0;
+      const isCpuBusy = cpu > CPU_ACTIVE_THRESHOLD;
+
+      // -- Hook-based decisions (authoritative) --
+      if (hookStatus === 'attention') {
+        session.status = 'attention';
+        session.attentionReason = 'Permission or input prompt';
+        this.lastActiveTime.delete(session.id);
+        if (prevStatus !== 'attention') {
+          this.emit('attention-needed', session.id, session.attentionReason);
+        }
+      } else if (hookStatus === 'idle') {
+        // Trust hook completely, ignore CPU/isProcessing
+        this.lastActiveTime.delete(session.id);
+        session.status = 'idle';
+        session.attentionReason = undefined;
+      } else if (hookStatus === 'active') {
+        this.lastActiveTime.set(session.id, now);
         session.status = 'active';
         session.attentionReason = undefined;
       } else {
-        // Not recently active — check terminal for attention patterns
-        this.checkTerminalStatus(session);
-        // checkTerminalStatus is async, status updated asynchronously
-        continue;
+        // -- No hook data -- fallback to heuristics --
+        const signalActive = isTerminalBusy || isCpuBusy;
+
+        if (signalActive) {
+          this.lastActiveTime.set(session.id, now);
+        }
+
+        const withinCooldown = (now - (this.lastActiveTime.get(session.id) || 0)) < ACTIVE_COOLDOWN;
+        const isActive = signalActive || withinCooldown;
+
+        if (isActive) {
+          session.status = 'active';
+          session.attentionReason = undefined;
+        } else if (session.status === 'active') {
+          session.status = 'idle';
+          session.attentionReason = undefined;
+        }
       }
 
       if (session.status !== prevStatus) {
@@ -81,49 +181,79 @@ export class AttentionDetector extends EventEmitter {
     }
   }
 
-  private async checkTerminalStatus(session: Session): Promise<void> {
-    const prevStatus = session.status;
+  /**
+   * Terminal content check (3s) -- reads terminal output for all live sessions.
+   * - Extracts Claude status line (e.g. "* Compacting conversation...") for statusText
+   * - Checks attention patterns for non-active/non-attention sessions (fallback)
+   */
+  private async updateTerminalInfo(): Promise<void> {
+    if (!this.getSessionsFn) return;
+    const sessions = this.getSessionsFn();
 
-    if (!session.tty) {
-      session.status = 'idle';
-      session.attentionReason = undefined;
-      if (prevStatus !== 'idle') this.emit('status-changed', session.id);
-      return;
-    }
+    const liveSessions = sessions.filter(
+      s => (s.type === 'discovered' || s.type === 'spawned')
+        && s.status !== 'dead' && s.status !== 'terminated'
+        && s.tty
+    );
+
+    await Promise.all(liveSessions.map(s => this.updateSessionTerminalInfo(s)));
+  }
+
+  private async updateSessionTerminalInfo(session: Session): Promise<void> {
+    const prevStatus = session.status;
+    const prevStatusText = session.statusText;
 
     try {
-      const content = await getSessionContentByTty(session.tty);
-      if (!content) {
-        session.status = 'idle';
-        session.attentionReason = undefined;
-        if (prevStatus !== 'idle') this.emit('status-changed', session.id);
-        return;
-      }
+      const content = await this.bridge!.getSessionContentByTty(session.tty!);
 
-      const lastLines = content.split('\n').slice(-10).join('\n');
-      const reason = this.detectAttention(lastLines);
+      if (content) {
+        // Extract Claude status line for all sessions (active, idle, etc.)
+        session.statusText = AttentionDetector.extractClaudeStatusLine(content) || undefined;
 
-      if (reason) {
-        session.status = 'attention';
-        session.attentionReason = reason;
-        if (prevStatus !== 'attention') {
-          this.emit('attention-needed', session.id, reason);
+        // Only check attention patterns for sessions not already handled by hooks
+        if (session.status !== 'active' && session.status !== 'attention') {
+          const lastLines = content.split('\n').slice(-10).join('\n');
+          const reason = AttentionDetector.detectAttention(lastLines);
+
+          if (reason) {
+            session.status = 'attention';
+            session.attentionReason = reason;
+            if (prevStatus !== 'attention') {
+              this.emit('attention-needed', session.id, reason);
+            }
+          }
         }
       } else {
-        session.status = 'idle';
-        session.attentionReason = undefined;
+        session.statusText = undefined;
       }
     } catch {
-      session.status = 'idle';
-      session.attentionReason = undefined;
+      session.statusText = undefined;
     }
 
-    if (session.status !== prevStatus) {
+    if (session.status !== prevStatus || session.statusText !== prevStatusText) {
       this.emit('status-changed', session.id);
     }
   }
 
-  private detectAttention(content: string): string | null {
+  /**
+   * Extract the last Claude status line from terminal content.
+   * Looks for lines starting with special Unicode indicators.
+   */
+  private static extractClaudeStatusLine(content: string): string | null {
+    const lines = content.split('\n');
+    const start = Math.max(0, lines.length - 20);
+
+    for (let i = lines.length - 1; i >= start; i--) {
+      const line = AttentionDetector.stripAnsi(lines[i]).trim();
+      if (!line) continue;
+      if (/^[✽✳]/.test(line)) {
+        return line;
+      }
+    }
+    return null;
+  }
+
+  private static detectAttention(content: string): string | null {
     const lastLines = content.split('\n').slice(-5).join('\n');
     for (const { pattern, reason } of ATTENTION_PATTERNS) {
       if (pattern.test(lastLines)) {

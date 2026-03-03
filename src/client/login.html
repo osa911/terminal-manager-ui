@@ -5,19 +5,57 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Terminal Manager — Login</title>
   <style>
+    :root {
+      --bg: #1a1b26;
+      --fg: #c0caf5;
+      --card-bg: #24283b;
+      --border: #3b4261;
+      --muted: #565f89;
+      --input-bg: #1a1b26;
+      --accent: #7aa2f7;
+      --accent-hover: #89b4fa;
+      --accent-text: #1a1b26;
+      --error: #f7768e;
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not(.dark) {
+        --bg: #f0f0f3;
+        --fg: #1a1b26;
+        --card-bg: #ffffff;
+        --border: #d0d0d8;
+        --muted: #6b7280;
+        --input-bg: #f5f5f8;
+        --accent: #4f6ef7;
+        --accent-hover: #3b5ce4;
+        --accent-text: #ffffff;
+        --error: #dc2626;
+      }
+    }
+    :root.light {
+      --bg: #f0f0f3;
+      --fg: #1a1b26;
+      --card-bg: #ffffff;
+      --border: #d0d0d8;
+      --muted: #6b7280;
+      --input-bg: #f5f5f8;
+      --accent: #4f6ef7;
+      --accent-hover: #3b5ce4;
+      --accent-text: #ffffff;
+      --error: #dc2626;
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #1a1b26;
-      color: #c0caf5;
+      background: var(--bg);
+      color: var(--fg);
       height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
     }
     .login-box {
-      background: #24283b;
-      border: 1px solid #3b4261;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
       border-radius: 12px;
       padding: 40px;
       width: 340px;
@@ -27,29 +65,29 @@
       margin-bottom: 8px;
     }
     p {
-      color: #565f89;
+      color: var(--muted);
       font-size: 13px;
       margin-bottom: 24px;
     }
     input {
       width: 100%;
       padding: 10px 14px;
-      background: #1a1b26;
-      border: 1px solid #3b4261;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
       border-radius: 6px;
-      color: #c0caf5;
+      color: var(--fg);
       font-size: 14px;
       outline: none;
       margin-bottom: 16px;
     }
     input:focus {
-      border-color: #7aa2f7;
+      border-color: var(--accent);
     }
     button {
       width: 100%;
       padding: 10px;
-      background: #7aa2f7;
-      color: #1a1b26;
+      background: var(--accent);
+      color: var(--accent-text);
       border: none;
       border-radius: 6px;
       font-size: 14px;
@@ -57,10 +95,10 @@
       cursor: pointer;
     }
     button:hover {
-      background: #89b4fa;
+      background: var(--accent-hover);
     }
     .error {
-      color: #f7768e;
+      color: var(--error);
       font-size: 13px;
       margin-bottom: 12px;
       display: none;
@@ -78,6 +116,12 @@
     </form>
   </div>
   <script>
+    // Sync theme override from main app (stored in localStorage)
+    const themeOverride = localStorage.getItem('theme-override');
+    if (themeOverride) {
+      document.documentElement.classList.add(themeOverride);
+    }
+
     document.getElementById('form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const password = document.getElementById('password').value;

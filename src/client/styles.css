@@ -735,12 +735,67 @@ textarea:disabled {
   border-radius: 10px;
   font-size: 11px;
   font-weight: 500;
+  transition: background 0.3s ease;
 }
 
 .badge-branch {
   background: var(--bg-tertiary);
   color: var(--orange);
   font-family: var(--font-mono);
+}
+
+/* ── Chat Status Bar ── */
+.chat-status-bar {
+  position: sticky;
+  bottom: 0;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.3s ease;
+}
+
+.chat-status-bar.hidden {
+  display: none;
+}
+
+.chat-status-bar .status-icon {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.chat-status-bar .status-icon.active {
+  background: var(--green);
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+.chat-status-bar .status-icon.idle {
+  background: var(--text-muted);
+}
+
+.chat-status-bar .status-icon.attention {
+  background: var(--orange);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.chat-status-bar .status-text {
+  color: var(--text-muted);
+}
+
+.chat-status-bar .status-text.active {
+  color: var(--green);
 }
 
 /* ── Status ── */

@@ -147,6 +147,10 @@ export class TerminalView {
     this.container.innerHTML = '';
   }
 
+  isActive(): boolean {
+    return this.terminal !== null;
+  }
+
   getDimensions(): { cols: number; rows: number } | null {
     if (!this.terminal) return null;
     return { cols: this.terminal.cols, rows: this.terminal.rows };

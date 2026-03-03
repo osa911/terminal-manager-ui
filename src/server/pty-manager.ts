@@ -28,7 +28,7 @@ export class PtyManager extends EventEmitter {
   }
 
   private spawnClaude(id: string, cwd: string, args: string[], replacesSessionId?: string): Session {
-    const claudePath = process.env.HOME + '/.local/bin/claude';
+    const claudePath = process.env.CLAUDE_PATH || path.join(process.env.HOME || '~', '.local', 'bin', 'claude');
     const ptyProcess = pty.spawn(claudePath, args, {
       name: 'xterm-256color',
       cols: 120,
@@ -94,6 +94,15 @@ export class PtyManager extends EventEmitter {
 
   getAllSessions(): Session[] {
     return Array.from(this.sessions.values()).map(s => s.session);
+  }
+
+  /** Return PIDs of all spawned processes so discovery can exclude them. */
+  getSpawnedPids(): Set<number> {
+    const pids = new Set<number>();
+    for (const s of this.sessions.values()) {
+      if (s.session.pid) pids.add(s.session.pid);
+    }
+    return pids;
   }
 
   killSession(sessionId: string): void {

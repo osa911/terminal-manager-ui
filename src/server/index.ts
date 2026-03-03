@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import * as crypto from 'crypto';
 import * as http from 'http';
@@ -7,7 +8,8 @@ import * as url from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Session, ClientMessage, ServerMessage, ChatMessage } from './types';
 import { discoverSessions } from './session-discovery';
-import { sendInput as itermSendInput, sendInputByTty } from './iterm-bridge';
+import { detectPlatform } from './platform';
+import { TerminalBridge, createBridge } from './terminal-bridge';
 import { JsonlWatcher } from './jsonl-watcher';
 import { AttentionDetector } from './attention-detector';
 import { PtyManager } from './pty-manager';
@@ -17,11 +19,15 @@ const DISCOVERY_INTERVAL = 15000; // Session discovery only (new/dead processes)
 const NAMES_FILE = path.join(__dirname, '..', '..', 'session-names.json');
 const SHARES_FILE = path.join(__dirname, '..', '..', 'share-tokens.json');
 const AUTH_PASSWORD = process.env.TM_PASSWORD || 'admin';
+const DEFAULT_CWD = process.env.TM_DEFAULT_CWD || process.env.HOME || '/';
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'dist', 'public');
 
-// Valid auth sessions (token → expiry timestamp)
-const authSessions = new Map<string, number>();
 const AUTH_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** Deterministic token derived from password — survives server restarts */
+function authToken(): string {
+  return crypto.createHash('sha256').update(AUTH_PASSWORD).digest('hex');
+}
 
 // Share tokens for external sharing (persisted)
 const shareTokens = new Map<string, { sessionId: string; interactive: boolean }>();
@@ -74,11 +80,7 @@ function loadShareTokens(): void {
 
 function saveShareTokens(): void {
   try {
-    const obj: Record<string, { sessionId: string; interactive: boolean }> = {};
-    for (const [token, info] of shareTokens) {
-      obj[token] = info;
-    }
-    fs.writeFileSync(SHARES_FILE, JSON.stringify(obj, null, 2));
+    fs.writeFileSync(SHARES_FILE, JSON.stringify(Object.fromEntries(shareTokens), null, 2));
   } catch (err) {
     console.error('Failed to save share tokens:', err);
   }
@@ -88,6 +90,7 @@ loadShareTokens();
 
 // ── State ──
 let sessions: Session[] = [];
+let bridge: TerminalBridge;
 const subscriptions = new Map<WebSocket, string>(); // ws → sessionId
 const sharedClients = new Map<WebSocket, { sessionId: string; interactive: boolean }>();
 
@@ -107,28 +110,9 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   return cookies;
 }
 
-function isAuthenticated(req: express.Request): boolean {
-  const cookies = parseCookies(req.headers.cookie);
-  const token = cookies['tm_auth'];
-  if (!token) return false;
-  const expiry = authSessions.get(token);
-  if (!expiry || Date.now() > expiry) {
-    authSessions.delete(token);
-    return false;
-  }
-  return true;
-}
-
-function isWsAuthenticated(req: http.IncomingMessage): boolean {
-  const cookies = parseCookies(req.headers.cookie);
-  const token = cookies['tm_auth'];
-  if (!token) return false;
-  const expiry = authSessions.get(token);
-  if (!expiry || Date.now() > expiry) {
-    authSessions.delete(token);
-    return false;
-  }
-  return true;
+function hasValidAuthCookie(cookieHeader: string | undefined): boolean {
+  const cookies = parseCookies(cookieHeader);
+  return cookies['tm_auth'] === authToken();
 }
 
 // ── Express ──
@@ -142,14 +126,12 @@ app.post('/api/login', (req, res) => {
     res.status(401).json({ error: 'Wrong password' });
     return;
   }
-  const token = crypto.randomBytes(32).toString('hex');
-  authSessions.set(token, Date.now() + AUTH_MAX_AGE);
-  res.setHeader('Set-Cookie', `tm_auth=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_MAX_AGE / 1000}`);
+  res.setHeader('Set-Cookie', `tm_auth=${authToken()}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_MAX_AGE / 1000}`);
   res.json({ ok: true });
 });
 
 app.get('/api/auth-check', (req, res) => {
-  res.json({ authenticated: isAuthenticated(req) });
+  res.json({ authenticated: hasValidAuthCookie(req.headers.cookie) });
 });
 
 // Share routes skip auth (share token is its own auth)
@@ -174,7 +156,7 @@ app.get('/login', (_req, res) => {
 app.use((req, res, next) => {
   // Static assets always allowed
   if (req.path.match(/\.(js|css|ico|png|svg)$/)) return next();
-  if (isAuthenticated(req)) return next();
+  if (hasValidAuthCookie(req.headers.cookie)) return next();
   res.redirect('/login');
 });
 
@@ -192,6 +174,11 @@ app.post('/api/share', (req, res) => {
   shareTokens.set(token, { sessionId, interactive: !!interactive });
   saveShareTokens();
   res.json({ token, url: `/share/${token}` });
+});
+
+// API: Client config (non-sensitive env vars for the UI)
+app.get('/api/config', (_req, res) => {
+  res.json({ defaultCwd: DEFAULT_CWD });
 });
 
 // API: List directories for folder browser
@@ -257,7 +244,7 @@ wss.on('connection', (ws, req) => {
   }
 
   const isShared = sharedClients.has(ws);
-  const isAuthed = isShared || isWsAuthenticated(req);
+  const isAuthed = isShared || hasValidAuthCookie(req.headers.cookie);
 
   if (!isAuthed) {
     ws.close(4001, 'Unauthorized');
@@ -318,9 +305,9 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<v
       if (session.type === 'spawned') {
         ptyManager.sendInput(msg.sessionId, msg.text);
       } else if (session.itermSessionId) {
-        await itermSendInput(session.itermSessionId, msg.text);
+        await bridge.sendInput(session.itermSessionId, msg.text);
       } else if (session.tty) {
-        const sent = await sendInputByTty(session.tty, msg.text);
+        const sent = await bridge.sendInputByTty(session.tty, msg.text);
         if (!sent) {
           console.warn(`Failed to send input for TTY ${session.tty}`);
         }
@@ -482,7 +469,7 @@ attentionDetector.on('status-changed', () => {
 // ── Discovery loop ──
 async function refreshSessions(): Promise<void> {
   try {
-    const discovered = await discoverSessions(jsonlWatcher);
+    const discovered = await discoverSessions(jsonlWatcher, bridge, ptyManager.getSpawnedPids());
     const spawned = ptyManager.getAllSessions();
 
     // Merge discovered + spawned, preserving attention state
@@ -491,18 +478,15 @@ async function refreshSessions(): Promise<void> {
     for (const d of discovered) {
       const existing = sessions.find(s => s.id === d.id);
       if (existing) {
-        // Preserve status set by AttentionDetector (active/attention/idle)
-        // Discovery always defaults to 'idle', so carry over detector's verdict
+        // Preserve status and activity timestamp set by AttentionDetector
         d.status = existing.status;
         d.attentionReason = existing.attentionReason;
+        d.lastActivity = existing.lastActivity;
       }
       merged.push(d);
     }
 
-    for (const s of spawned) {
-      merged.push(s);
-    }
-
+    merged.push(...spawned);
     sessions = merged;
     applyCustomNames(sessions);
     broadcast({ type: 'sessions-update', sessions });
@@ -512,17 +496,28 @@ async function refreshSessions(): Promise<void> {
 }
 
 // ── Start ──
-server.listen(PORT, () => {
-  console.log(`Terminal Manager running at http://localhost:${PORT}`);
+async function start(): Promise<void> {
+  const platform = await detectPlatform();
+  bridge = createBridge(platform);
+  console.log(`Platform: ${platform}, bridge: ${bridge.constructor.name}`);
 
-  jsonlWatcher.start();
-  attentionDetector.start(() => sessions, jsonlWatcher);
+  server.listen(PORT, () => {
+    console.log(`Terminal Manager running at http://localhost:${PORT}`);
 
-  // Initial discovery
-  refreshSessions();
+    jsonlWatcher.start();
+    attentionDetector.start(() => sessions, bridge);
 
-  // Periodic refresh
-  setInterval(refreshSessions, DISCOVERY_INTERVAL);
+    // Initial discovery
+    refreshSessions();
+
+    // Periodic refresh
+    setInterval(refreshSessions, DISCOVERY_INTERVAL);
+  });
+}
+
+start().catch((err) => {
+  console.error('Failed to start:', err);
+  process.exit(1);
 });
 
 // ── Graceful shutdown ──
