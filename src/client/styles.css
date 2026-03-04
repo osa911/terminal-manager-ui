@@ -627,6 +627,58 @@ body {
   line-height: 1.3;
 }
 
+/* ── Image Preview ── */
+#image-preview-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+#image-preview-area:empty {
+  display: none;
+}
+
+.image-preview-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.image-preview-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-preview-thumb .remove-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 0;
+}
+
+.image-preview-thumb:hover .remove-btn {
+  opacity: 1;
+}
+
 /* ── Input Bar ── */
 #input-bar {
   padding: 12px 20px;
@@ -1204,6 +1256,16 @@ textarea:disabled {
 
   #input-text {
     font-size: 16px; /* Prevents iOS zoom on focus */
+  }
+
+  /* Image preview — smaller thumbs, always-visible remove */
+  .image-preview-thumb {
+    width: 56px;
+    height: 56px;
+  }
+
+  .image-preview-thumb .remove-btn {
+    opacity: 1;
   }
 
   /* Modal — full-screen on mobile */

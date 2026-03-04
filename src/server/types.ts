@@ -1,3 +1,8 @@
+export interface QuickAction {
+  label: string;
+  value: string;
+}
+
 export interface Session {
   id: string;
   type: 'discovered' | 'spawned' | 'terminated';
@@ -12,6 +17,8 @@ export interface Session {
   claudeSessionId?: string;
   status: 'active' | 'idle' | 'attention' | 'dead' | 'terminated';
   attentionReason?: string;
+  /** Parsed quick actions from terminal content (populated when status=attention) */
+  quickActions?: QuickAction[];
   /** Real-time Claude status line extracted from terminal (e.g. "✽ Compacting conversation…") */
   statusText?: string;
   lastActivity: number;
@@ -78,7 +85,7 @@ export type ServerMessage =
   | { type: 'terminal-content'; sessionId: string; content: string }
   | { type: 'chat-messages'; sessionId: string; messages: ChatMessage[] }
   | { type: 'chat-message-append'; sessionId: string; message: ChatMessage }
-  | { type: 'attention-needed'; sessionId: string; reason: string }
+  | { type: 'attention-needed'; sessionId: string; reason: string; quickActions?: QuickAction[] }
   | { type: 'pty-data'; sessionId: string; data: string };
 
 // WebSocket messages: Client → Server

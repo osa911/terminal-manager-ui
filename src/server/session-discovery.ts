@@ -142,7 +142,7 @@ function getProcessInfoProc(pid: number): PidInfo {
   return { cwd, claudeSessionId };
 }
 
-function getProcessInfo(pid: number): Promise<PidInfo> {
+export function getProcessInfo(pid: number): Promise<PidInfo> {
   if (process.platform === 'linux') {
     return Promise.resolve(getProcessInfoProc(pid));
   }

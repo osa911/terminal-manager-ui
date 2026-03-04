@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import { Session } from './types';
+import { Session, QuickAction } from './types';
 import { TerminalBridge } from './terminal-bridge';
 
 const CHECK_INTERVAL = 1500;
@@ -143,18 +143,31 @@ export class AttentionDetector extends EventEmitter {
         session.status = 'attention';
         session.attentionReason = 'Permission or input prompt';
         this.lastActiveTime.delete(session.id);
+
+        // Parse quick actions from terminal content on first attention detection
+        if (prevStatus !== 'attention' && session.tty && this.bridge?.supportsContentReading) {
+          try {
+            const content = await this.bridge.getSessionContentByTty(session.tty);
+            if (content) {
+              session.quickActions = AttentionDetector.parseQuickActions(content);
+            }
+          } catch { /* ignore */ }
+        }
+
         if (prevStatus !== 'attention') {
-          this.emit('attention-needed', session.id, session.attentionReason);
+          this.emit('attention-needed', session.id, session.attentionReason, session.quickActions);
         }
       } else if (hookStatus === 'idle') {
         // Trust hook completely, ignore CPU/isProcessing
         this.lastActiveTime.delete(session.id);
         session.status = 'idle';
         session.attentionReason = undefined;
+        session.quickActions = undefined;
       } else if (hookStatus === 'active') {
         this.lastActiveTime.set(session.id, now);
         session.status = 'active';
         session.attentionReason = undefined;
+        session.quickActions = undefined;
       } else {
         // -- No hook data -- fallback to heuristics --
         const signalActive = isTerminalBusy || isCpuBusy;
@@ -210,6 +223,11 @@ export class AttentionDetector extends EventEmitter {
         // Extract Claude status line for all sessions (active, idle, etc.)
         session.statusText = AttentionDetector.extractClaudeStatusLine(content) || undefined;
 
+        // Refresh quick actions for sessions in attention state
+        if (session.status === 'attention') {
+          session.quickActions = AttentionDetector.parseQuickActions(content);
+        }
+
         // Only check attention patterns for sessions not already handled by hooks
         if (session.status !== 'active' && session.status !== 'attention') {
           const lastLines = content.split('\n').slice(-10).join('\n');
@@ -218,8 +236,9 @@ export class AttentionDetector extends EventEmitter {
           if (reason) {
             session.status = 'attention';
             session.attentionReason = reason;
+            session.quickActions = AttentionDetector.parseQuickActions(content);
             if (prevStatus !== 'attention') {
-              this.emit('attention-needed', session.id, reason);
+              this.emit('attention-needed', session.id, reason, session.quickActions);
             }
           }
         }
@@ -261,5 +280,48 @@ export class AttentionDetector extends EventEmitter {
       }
     }
     return null;
+  }
+
+  /**
+   * Parse quick actions from terminal content by looking at the last 25 lines.
+   * Handles: numbered options, y/n prompts, Enter prompts.
+   */
+  static parseQuickActions(content: string): QuickAction[] {
+    const lines = content.split('\n').slice(-25).map(l => AttentionDetector.stripAnsi(l));
+
+    // 1. Numbered options (Claude plan approval, AskUserQuestion, etc.)
+    //    e.g. "› 1. Yes, clear context..." or "  2. Yes, auto-accept edits"
+    const numbered: QuickAction[] = [];
+    for (const line of lines) {
+      const match = line.match(/^\s*[›❯>]?\s*(\d+)\.\s+(.+)$/);
+      if (match) {
+        numbered.push({ label: match[2].trim(), value: match[1] });
+      }
+    }
+    if (numbered.length >= 2) return numbered;
+
+    // 2. Permission prompt: ? (y)es (n)o
+    const tail = lines.slice(-8).join('\n');
+    if (/\(y\)es.*\(n\)o/i.test(tail)) {
+      return [
+        { label: 'Allow', value: 'y' },
+        { label: 'Deny', value: 'n' },
+      ];
+    }
+
+    // 3. Confirmation: [Y/n] or [y/N]
+    if (/\[Y\/n\]/i.test(tail) || /\[y\/N\]/i.test(tail)) {
+      return [
+        { label: 'Yes', value: 'y' },
+        { label: 'No', value: 'n' },
+      ];
+    }
+
+    // 4. Press Enter to continue
+    if (/Press Enter to continue/i.test(tail)) {
+      return [{ label: 'Continue', value: '' }];
+    }
+
+    return [];
   }
 }

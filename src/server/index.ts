@@ -5,9 +5,10 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as url from 'url';
+import { execSync } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Session, ClientMessage, ServerMessage, ChatMessage } from './types';
-import { discoverSessions } from './session-discovery';
+import { discoverSessions, getProcessInfo } from './session-discovery';
 import { detectPlatform } from './platform';
 import { TerminalBridge, createBridge } from './terminal-bridge';
 import { JsonlWatcher } from './jsonl-watcher';
@@ -18,6 +19,7 @@ const PORT = 3456;
 const DISCOVERY_INTERVAL = 15000; // Session discovery only (new/dead processes); status is event-driven
 const NAMES_FILE = path.join(__dirname, '..', '..', 'session-names.json');
 const SHARES_FILE = path.join(__dirname, '..', '..', 'share-tokens.json');
+const SPAWNED_FILE = path.join(__dirname, '..', '..', 'spawned-sessions.json');
 const AUTH_PASSWORD = process.env.TM_PASSWORD || 'admin';
 const DEFAULT_CWD = process.env.TM_DEFAULT_CWD || process.env.HOME || '/';
 const PUBLIC_DIR = path.join(__dirname, '..', '..', 'dist', 'public');
@@ -87,6 +89,80 @@ function saveShareTokens(): void {
 }
 
 loadShareTokens();
+
+// ── Persisted spawned sessions (survive server restarts) ──
+interface PersistedSession {
+  claudeSessionId: string;
+  cwd: string;
+}
+
+let persistedSessions: PersistedSession[] = [];
+
+function loadPersistedSessions(): void {
+  try {
+    if (fs.existsSync(SPAWNED_FILE)) {
+      persistedSessions = JSON.parse(fs.readFileSync(SPAWNED_FILE, 'utf-8'));
+    }
+  } catch {
+    persistedSessions = [];
+  }
+}
+
+/** Synchronously get claudeSessionId via lsof (used during shutdown) */
+function getClaudeSessionIdSync(pid: number): string | null {
+  try {
+    const output = execSync(`lsof -p ${pid} -Fn 2>/dev/null`, { encoding: 'utf-8', timeout: 3000 });
+    for (const line of output.split('\n')) {
+      const match = line.match(/\.claude\/tasks\/([0-9a-f-]{36})/);
+      if (match) return match[1];
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function savePersistedSessions(): void {
+  try {
+    const live: PersistedSession[] = [];
+    for (const session of ptyManager.getAllSessions()) {
+      // Last-chance sync enrichment for sessions without claudeSessionId
+      if (!session.claudeSessionId && session.pid) {
+        session.claudeSessionId = getClaudeSessionIdSync(session.pid) || undefined;
+      }
+      if (session.claudeSessionId && session.cwd) {
+        live.push({ claudeSessionId: session.claudeSessionId, cwd: session.cwd });
+      }
+    }
+    fs.writeFileSync(SPAWNED_FILE, JSON.stringify(live, null, 2));
+  } catch (err) {
+    console.error('Failed to save spawned sessions:', err);
+  }
+}
+
+/** Eagerly enrich a spawned session's claudeSessionId shortly after creation */
+function scheduleEnrichment(session: Session): void {
+  if (!session.pid) return;
+  // Try at 3s, 8s, 15s — Claude needs a moment to start and create its task directory
+  for (const delay of [3000, 8000, 15000]) {
+    setTimeout(async () => {
+      if (session.claudeSessionId) return; // Already enriched
+      try {
+        const info = await getProcessInfo(session.pid!);
+        if (info.claudeSessionId) {
+          session.claudeSessionId = info.claudeSessionId;
+          savePersistedSessions();
+        }
+      } catch { /* ignore */ }
+    }, delay);
+  }
+}
+
+function clearPersistedSessions(): void {
+  try {
+    if (fs.existsSync(SPAWNED_FILE)) fs.unlinkSync(SPAWNED_FILE);
+  } catch { /* ignore */ }
+}
+
+loadPersistedSessions();
 
 // ── State ──
 let sessions: Session[] = [];
@@ -159,6 +235,36 @@ app.use((req, res, next) => {
   if (hasValidAuthCookie(req.headers.cookie)) return next();
   res.redirect('/login');
 });
+
+// API: Upload pasted image — saves to /tmp/tm-images/, returns file path
+const IMAGE_DIR = '/tmp/tm-images';
+const IMAGE_EXT_MAP: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+};
+
+app.post(
+  '/api/upload-image',
+  express.raw({ type: 'image/*', limit: '10mb' }),
+  (req, res) => {
+    const contentType = req.headers['content-type'] || 'image/png';
+    const ext = IMAGE_EXT_MAP[contentType] ?? 'png';
+    const filename = `screenshot-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    const filePath = path.join(IMAGE_DIR, filename);
+
+    try {
+      fs.mkdirSync(IMAGE_DIR, { recursive: true });
+      fs.writeFileSync(filePath, req.body);
+      res.json({ path: filePath });
+    } catch (err) {
+      console.error('Failed to save uploaded image:', err);
+      res.status(500).json({ error: 'Failed to save image' });
+    }
+  },
+);
 
 app.use(express.static(PUBLIC_DIR));
 
@@ -329,6 +435,7 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<v
         const session = ptyManager.createSession(msg.cwd);
         console.log('Session created:', session.id, 'pid:', session.pid);
         sessions.push(session);
+        scheduleEnrichment(session);
         broadcast({ type: 'sessions-update', sessions });
       } catch (err) {
         console.error('Failed to create session:', err);
@@ -458,8 +565,8 @@ jsonlWatcher.on('message', (filePath: string, message: ChatMessage) => {
 });
 
 // ── Attention events ──
-attentionDetector.on('attention-needed', (sessionId: string, reason: string) => {
-  broadcast({ type: 'attention-needed', sessionId, reason });
+attentionDetector.on('attention-needed', (sessionId: string, reason: string, quickActions?: { label: string; value: string }[]) => {
+  broadcast({ type: 'attention-needed', sessionId, reason, quickActions });
 });
 
 attentionDetector.on('status-changed', () => {
@@ -471,6 +578,21 @@ async function refreshSessions(): Promise<void> {
   try {
     const discovered = await discoverSessions(jsonlWatcher, bridge, ptyManager.getSpawnedPids());
     const spawned = ptyManager.getAllSessions();
+
+    // Enrich spawned sessions with claudeSessionId (needed for persistence/resume)
+    for (const session of spawned) {
+      if (!session.claudeSessionId && session.pid) {
+        try {
+          const info = await getProcessInfo(session.pid);
+          if (info.claudeSessionId) {
+            session.claudeSessionId = info.claudeSessionId;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Persist spawned sessions so they survive server restarts
+    savePersistedSessions();
 
     // Merge discovered + spawned, preserving attention state
     const merged: Session[] = [];
@@ -501,14 +623,41 @@ async function start(): Promise<void> {
   bridge = createBridge(platform);
   console.log(`Platform: ${platform}, bridge: ${bridge.constructor.name}`);
 
-  server.listen(PORT, () => {
+  server.listen(PORT, async () => {
     console.log(`Terminal Manager running at http://localhost:${PORT}`);
 
     jsonlWatcher.start();
     attentionDetector.start(() => sessions, bridge);
 
     // Initial discovery
-    refreshSessions();
+    await refreshSessions();
+
+    // Auto-resume spawned sessions from previous server run
+    if (persistedSessions.length > 0) {
+      const running = new Set(
+        sessions
+          .filter(s => s.type === 'discovered' || s.type === 'spawned')
+          .map(s => s.claudeSessionId)
+          .filter(Boolean),
+      );
+
+      for (const persisted of persistedSessions) {
+        if (running.has(persisted.claudeSessionId)) continue;
+        try {
+          console.log(`Auto-resuming session ${persisted.claudeSessionId} in ${persisted.cwd}`);
+          const session = ptyManager.resumeSession(persisted.claudeSessionId, persisted.cwd, `auto-resume-${persisted.claudeSessionId}`);
+          sessions.push(session);
+          scheduleEnrichment(session);
+        } catch (err) {
+          console.error(`Failed to auto-resume ${persisted.claudeSessionId}:`, err);
+        }
+      }
+
+      if (sessions.some(s => s.type === 'spawned')) {
+        broadcast({ type: 'sessions-update', sessions });
+      }
+      clearPersistedSessions();
+    }
 
     // Periodic refresh
     setInterval(refreshSessions, DISCOVERY_INTERVAL);
@@ -523,6 +672,8 @@ start().catch((err) => {
 // ── Graceful shutdown ──
 function shutdown(): void {
   console.log('\nShutting down...');
+  // Save spawned sessions so they can be auto-resumed on next start
+  savePersistedSessions();
   attentionDetector.stop();
   jsonlWatcher.stop();
   ptyManager.destroy();

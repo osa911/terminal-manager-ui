@@ -3,6 +3,11 @@ import { TerminalView } from './terminal-view';
 import { playDoneChime, playAttentionSound } from './sounds';
 
 // ── Types (mirror server types) ──
+interface QuickAction {
+  label: string;
+  value: string;
+}
+
 interface Session {
   id: string;
   type: 'discovered' | 'spawned' | 'terminated';
@@ -16,6 +21,7 @@ interface Session {
   claudeSessionId?: string;
   status: 'active' | 'idle' | 'attention' | 'dead' | 'terminated';
   attentionReason?: string;
+  quickActions?: QuickAction[];
   statusText?: string;
   lastActivity: number;
   startedAt?: number;
@@ -28,8 +34,14 @@ type ServerMessage =
   | { type: 'terminal-content'; sessionId: string; content: string }
   | { type: 'chat-messages'; sessionId: string; messages: ChatMessage[] }
   | { type: 'chat-message-append'; sessionId: string; message: ChatMessage }
-  | { type: 'attention-needed'; sessionId: string; reason: string }
+  | { type: 'attention-needed'; sessionId: string; reason: string; quickActions?: QuickAction[] }
   | { type: 'pty-data'; sessionId: string; data: string };
+
+// ── Image paste drafts ──
+interface ImageDraft {
+  file: File;
+  objectUrl: string;
+}
 
 // ── State ──
 let ws: WebSocket | null = null;
@@ -37,6 +49,8 @@ let sessions: Session[] = [];
 let selectedSessionId: string | null = null;
 let searchQuery = '';
 let isSharedView = false;
+const inputDrafts = new Map<string, string>();
+const imageDrafts = new Map<string, ImageDraft[]>();
 let shareToken: string | null = null;
 let isEditMode = false;
 
@@ -156,7 +170,16 @@ function handleServerMessage(msg: ServerMessage | { type: 'access-level'; canEdi
         }
       }
 
-      if (prev && !sessions.find(s => s.id === prev)) {
+      // If we just resumed a terminated session, switch to the new spawned one
+      if (pendingResumeSessionId) {
+        const newSpawned = sessions.find(
+          s => s.type === 'spawned' && !prevSessions.find(p => p.id === s.id),
+        );
+        if (newSpawned) {
+          pendingResumeSessionId = null;
+          selectSession(newSpawned.id);
+        }
+      } else if (prev && !sessions.find(s => s.id === prev)) {
         // Our selected session was replaced — find the resumed one
         const resumed = sessions.find(s => s.type === 'spawned' && s.status === 'active');
         if (resumed) {
@@ -199,12 +222,12 @@ function handleServerMessage(msg: ServerMessage | { type: 'access-level'; canEdi
       break;
 
     case 'attention-needed':
-      handleAttention(msg.sessionId, msg.reason);
+      handleAttention(msg.sessionId, msg.reason, msg.quickActions);
       break;
   }
 }
 
-function handleAttention(sessionId: string, reason: string): void {
+function handleAttention(sessionId: string, reason: string, quickActions?: QuickAction[]): void {
   // Play attention sound
   playAttentionSound();
 
@@ -213,6 +236,7 @@ function handleAttention(sessionId: string, reason: string): void {
   if (session) {
     session.status = 'attention';
     session.attentionReason = reason;
+    session.quickActions = quickActions;
     renderSessionList();
   }
 
@@ -264,66 +288,59 @@ function groupByDate(items: Session[]): Map<string, Session[]> {
   return groups;
 }
 
-function renderSessionList(): void {
-  const filtered = sessions.filter(s => matchesSearch(s, searchQuery));
-  const activeSessions = filtered.filter(s => s.type !== 'terminated');
-  const terminatedSessions = filtered.filter(s => s.type === 'terminated');
+function isToday(ts: number): boolean {
+  const now = new Date();
+  const date = new Date(ts);
+  return date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+}
 
-  sessionCount.textContent = `${filtered.length}`;
+function renderSessionList(): void {
+  const activeSessions = sessions
+    .filter(s => s.type !== 'terminated')
+    .filter(s => matchesSearch(s, searchQuery));
+
+  const todayTerminated = sessions
+    .filter(s => s.type === 'terminated' && isToday(s.lastActivity))
+    .filter(s => matchesSearch(s, searchQuery));
+
+  sessionCount.textContent = `${activeSessions.length + todayTerminated.length}`;
 
   // Sort active: attention first, then active, then idle, then dead
-  const statusOrder: Record<string, number> = { attention: 0, active: 1, idle: 2, dead: 3, terminated: 4 };
+  const statusOrder: Record<string, number> = { attention: 0, active: 1, idle: 2, dead: 3 };
   const sortedActive = [...activeSessions].sort((a, b) => {
     const orderDiff = (statusOrder[a.status] ?? 2) - (statusOrder[b.status] ?? 2);
     if (orderDiff !== 0) return orderDiff;
     return b.lastActivity - a.lastActivity;
   });
 
-  // Sort terminated by last activity (most recent first)
-  const sortedTerminated = [...terminatedSessions].sort((a, b) => b.lastActivity - a.lastActivity);
+  // Sort terminated by most recent first
+  const sortedTerminated = [...todayTerminated].sort((a, b) => b.lastActivity - a.lastActivity);
 
   sessionList.innerHTML = '';
 
-  // Active sessions section (grouped by date)
+  // Active sessions
   if (sortedActive.length > 0) {
-    const header = document.createElement('div');
-    header.className = 'session-section-header';
-    header.textContent = `Active (${sortedActive.length})`;
-    sessionList.appendChild(header);
-
-    const dateGroups = groupByDate(sortedActive);
-    for (const [dateLabel, items] of dateGroups) {
-      const dh = document.createElement('div');
-      dh.className = 'session-date-header';
-      dh.textContent = dateLabel;
-      sessionList.appendChild(dh);
-      for (const session of items) {
-        sessionList.appendChild(renderSessionItem(session));
-      }
+    for (const session of sortedActive) {
+      sessionList.appendChild(renderSessionItem(session));
     }
   }
 
-  // Terminated sessions section (grouped by date)
+  // Today's terminated sessions
   if (sortedTerminated.length > 0) {
     const header = document.createElement('div');
     header.className = 'session-section-header';
-    header.textContent = `Recent (${sortedTerminated.length})`;
+    header.textContent = `Today's closed (${sortedTerminated.length})`;
     sessionList.appendChild(header);
-
-    const dateGroups = groupByDate(sortedTerminated);
-    for (const [dateLabel, items] of dateGroups) {
-      const dh = document.createElement('div');
-      dh.className = 'session-date-header';
-      dh.textContent = dateLabel;
-      sessionList.appendChild(dh);
-      for (const session of items) {
-        sessionList.appendChild(renderSessionItem(session));
-      }
+    for (const session of sortedTerminated) {
+      sessionList.appendChild(renderSessionItem(session));
     }
   }
 
   // Empty search state
-  if (filtered.length === 0 && searchQuery) {
+  const total = activeSessions.length + todayTerminated.length;
+  if (total === 0 && searchQuery) {
     const empty = document.createElement('div');
     empty.className = 'session-search-empty';
     empty.textContent = `No sessions matching "${searchQuery}"`;
@@ -401,25 +418,20 @@ function updateSessionHeader(): void {
     btnTerminate.classList.add('hidden');
   }
 
-  // Show/hide quick actions based on attention reason
-  if (session.status === 'attention' && session.attentionReason) {
-    const buttons = getQuickActionsForReason(session.attentionReason);
-    if (buttons.length > 0) {
-      quickActions.innerHTML = buttons
-        .map(label => `<button class="btn btn-quick" data-action="${escapeHtml(label)}"${isEditMode ? '' : ' disabled'}>${escapeHtml(label)}</button>`)
-        .join('');
-      if (isEditMode) {
-        quickActions.querySelectorAll('.btn-quick').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const action = (btn as HTMLElement).dataset.action;
-            if (action) sendInput(action);
-          });
+  // Show/hide quick actions based on server-parsed terminal content
+  if (session.status === 'attention' && session.quickActions && session.quickActions.length > 0) {
+    quickActions.innerHTML = session.quickActions
+      .map(qa => `<button class="btn btn-quick" data-value="${escapeHtml(qa.value)}" title="${escapeHtml(qa.label)}"${isEditMode ? '' : ' disabled'}>${escapeHtml(qa.label)}</button>`)
+      .join('');
+    if (isEditMode) {
+      quickActions.querySelectorAll('.btn-quick').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const value = (btn as HTMLElement).dataset.value;
+          if (value !== undefined) sendInput(value);
         });
-      }
-      quickActions.classList.remove('hidden');
-    } else {
-      quickActions.classList.add('hidden');
+      });
     }
+    quickActions.classList.remove('hidden');
   } else {
     quickActions.classList.add('hidden');
   }
@@ -427,14 +439,34 @@ function updateSessionHeader(): void {
 
 // ── Session selection ──
 function selectSession(sessionId: string): void {
+  // Save draft from previous session
+  if (selectedSessionId) {
+    const draft = inputText.value;
+    if (draft) {
+      inputDrafts.set(selectedSessionId, draft);
+    } else {
+      inputDrafts.delete(selectedSessionId);
+    }
+  }
+
   selectedSessionId = sessionId;
   history.replaceState(null, '', `#session=${sessionId}`);
+
+  // Restore draft for new session
+  inputText.value = inputDrafts.get(sessionId) || '';
+  inputText.style.height = 'auto';
+  if (inputText.value) {
+    inputText.style.height = Math.min(inputText.scrollHeight, 200) + 'px';
+  }
 
   emptyState.classList.add('hidden');
   sessionView.classList.remove('hidden');
 
   // Mobile: show content, hide sidebar
   $('main').classList.add('session-open');
+
+  // Render image previews for the new session
+  renderImagePreviews();
 
   updateSessionHeader();
   renderSessionList();
@@ -449,16 +481,12 @@ function selectSession(sessionId: string): void {
     $('chat-view').classList.add('hidden');
     $('terminal-view').classList.remove('hidden');
     $('input-bar').classList.add('hidden');
-    if (!terminalView.isActive()) {
-      // First time or after destroy — initialize fresh
-      terminalView.initInteractive(
-        (data) => send({ type: 'send-input', sessionId, text: data }),
-        (cols, rows) => send({ type: 'resize', sessionId, cols, rows }),
-      );
-    } else {
-      // Already initialized — just refit after showing
-      terminalView.fit();
-    }
+    // Always reinitialize so callbacks are bound to the correct sessionId
+    // and the terminal buffer is cleared for the new session
+    terminalView.initInteractive(
+      (data) => send({ type: 'send-input', sessionId, text: data }),
+      (cols, rows) => send({ type: 'resize', sessionId, cols, rows }),
+    );
   } else {
     // Discovered/terminated session: show chat view
     $('chat-view').classList.remove('hidden');
@@ -480,11 +508,14 @@ function goBack(): void {
 }
 
 // ── Resume session ──
+let pendingResumeSessionId: string | null = null;
+
 function resumeSession(): void {
   if (!selectedSessionId) return;
   const session = sessions.find(s => s.id === selectedSessionId);
   if (!session || session.type !== 'terminated' || !session.claudeSessionId) return;
 
+  pendingResumeSessionId = selectedSessionId;
   send({ type: 'resume-session', sessionId: selectedSessionId });
 }
 
@@ -538,12 +569,94 @@ function terminateSession(): void {
   send({ type: 'terminate-session', sessionId: selectedSessionId });
 }
 
+// ── Image preview rendering ──
+function renderImagePreviews(): void {
+  const inputBar = $('input-bar');
+  let area = document.getElementById('image-preview-area');
+
+  const drafts = selectedSessionId ? imageDrafts.get(selectedSessionId) : undefined;
+  if (!drafts || drafts.length === 0) {
+    area?.remove();
+    return;
+  }
+
+  if (!area) {
+    area = document.createElement('div');
+    area.id = 'image-preview-area';
+    inputBar.insertBefore(area, inputBar.firstChild);
+  }
+
+  area.innerHTML = '';
+  for (const [i, draft] of drafts.entries()) {
+    const thumb = document.createElement('div');
+    thumb.className = 'image-preview-thumb';
+
+    const img = document.createElement('img');
+    img.src = draft.objectUrl;
+    img.alt = 'Pasted image';
+    thumb.appendChild(img);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-btn';
+    removeBtn.textContent = '\u00d7';
+    removeBtn.title = 'Remove image';
+    removeBtn.addEventListener('click', () => {
+      if (!selectedSessionId) return;
+      const list = imageDrafts.get(selectedSessionId);
+      if (list) {
+        URL.revokeObjectURL(list[i].objectUrl);
+        list.splice(i, 1);
+        if (list.length === 0) imageDrafts.delete(selectedSessionId);
+      }
+      renderImagePreviews();
+    });
+    thumb.appendChild(removeBtn);
+
+    area.appendChild(thumb);
+  }
+}
+
+// ── Image upload helper ──
+async function uploadImage(file: File): Promise<string> {
+  const resp = await fetch('/api/upload-image', {
+    method: 'POST',
+    headers: { 'Content-Type': file.type || 'image/png' },
+    body: file,
+  });
+  if (!resp.ok) throw new Error('Image upload failed');
+  const data = await resp.json();
+  return data.path as string;
+}
+
 // ── Input handling ──
-function sendInput(text: string): void {
-  if (!selectedSessionId || !text.trim()) return;
-  send({ type: 'send-input', sessionId: selectedSessionId, text: text.trim() });
+async function sendInput(text: string): Promise<void> {
+  if (!selectedSessionId) return;
+
+  // Upload any pending images and build the final message
+  const drafts = imageDrafts.get(selectedSessionId);
+  let imagePaths: string[] = [];
+  if (drafts && drafts.length > 0) {
+    try {
+      imagePaths = await Promise.all(drafts.map(d => uploadImage(d.file)));
+      for (const d of drafts) URL.revokeObjectURL(d.objectUrl);
+      imageDrafts.delete(selectedSessionId);
+      renderImagePreviews();
+    } catch (err) {
+      console.error('Failed to upload images:', err);
+      return;
+    }
+  }
+
+  const trimmed = text.trim();
+  const pathStr = imagePaths.join(' ');
+  const message = trimmed && pathStr ? `${trimmed} ${pathStr}` : trimmed || pathStr;
+
+  if (!message) return;
+
+  send({ type: 'send-input', sessionId: selectedSessionId, text: message });
   inputText.value = '';
   inputText.style.height = 'auto';
+  inputDrafts.delete(selectedSessionId);
 
   // Clear attention state
   const session = sessions.find(s => s.id === selectedSessionId);
@@ -698,15 +811,6 @@ function escapeHtml(text: string): string {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
-}
-
-function getQuickActionsForReason(reason: string): string[] {
-  if (/permission/i.test(reason)) return ['Allow', 'Deny'];
-  if (/confirmation/i.test(reason)) return ['Yes', 'No'];
-  if (/edit approval/i.test(reason)) return ['Accept', 'Reject'];
-  if (/waiting for enter/i.test(reason)) return ['Enter'];
-  if (/question prompt/i.test(reason)) return ['1', '2', '3', '4'];
-  return [];
 }
 
 function truncate(text: string, maxLen: number): string {
@@ -887,6 +991,27 @@ function init(): void {
     // Auto-resize textarea to fit content
     inputText.style.height = 'auto';
     inputText.style.height = Math.min(inputText.scrollHeight, 200) + 'px';
+  });
+
+  // Paste: intercept image paste events
+  inputText.addEventListener('paste', (e) => {
+    if (!isEditMode || !selectedSessionId) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (!item.type.startsWith('image/')) continue;
+      e.preventDefault();
+      const file = item.getAsFile();
+      if (!file) continue;
+
+      const objectUrl = URL.createObjectURL(file);
+      const list = imageDrafts.get(selectedSessionId) || [];
+      list.push({ file, objectUrl });
+      imageDrafts.set(selectedSessionId, list);
+      renderImagePreviews();
+      break; // one image per paste event
+    }
   });
 
   // Back button (mobile)
