@@ -179,15 +179,15 @@ function extractBranch(cwd: string): string | null {
   }
 }
 
-function matchTtyToIterm(
+function matchTtyToTerminalSession(
   processTty: string,
-  itermSessions: ITermSession[]
+  terminalSessions: ITermSession[]
 ): ITermSession | undefined {
   if (!processTty || processTty === '??') return undefined;
 
-  // ps -eo tty shows "ttys000", iTerm2 shows "/dev/ttys000"
+  // ps -eo tty shows "ttys000", iTerm2/tmux shows "/dev/ttys000"
   const normalizedTty = normalizeTtyPath(processTty);
-  return itermSessions.find(s => s.tty === normalizedTty);
+  return terminalSessions.find(s => s.tty === normalizedTty);
 }
 
 /**
@@ -332,7 +332,7 @@ function discoverTerminatedSessions(runningSessionIds: Set<string>): Session[] {
 }
 
 export async function discoverSessions(jsonlWatcher: JsonlWatcher, bridge: TerminalBridge, excludePids?: Set<number>): Promise<Session[]> {
-  const [processes, itermSessions] = await Promise.all([
+  const [processes, terminalSessions] = await Promise.all([
     findClaudeProcesses(),
     bridge.enumerateSessions(),
   ]);
@@ -366,7 +366,7 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher, bridge: Termi
 
   for (const { proc, info } of processInfos) {
     const cwd = info.cwd;
-    const itermSession = matchTtyToIterm(proc.tty, itermSessions);
+    const terminalSession = matchTtyToTerminalSession(proc.tty, terminalSessions);
 
     // Find JSONL by exact session ID (from lsof .claude/tasks/<uuid>)
     let jsonlPath: string | null = null;
@@ -422,8 +422,9 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher, bridge: Termi
       } catch { /* ignore */ }
     }
 
+    const isTmuxSession = terminalSession?.id.startsWith('tmux:');
     const session: Session = {
-      id: itermSession?.id || `pid-${proc.pid}`,
+      id: terminalSession?.id || `pid-${proc.pid}`,
       type: 'discovered',
       pid: proc.pid,
       tty: proc.tty,
@@ -431,7 +432,8 @@ export async function discoverSessions(jsonlWatcher: JsonlWatcher, bridge: Termi
       projectName: cwd ? extractProjectName(cwd) : undefined,
       branch,
       summary,
-      itermSessionId: itermSession?.id,
+      itermSessionId: isTmuxSession ? undefined : terminalSession?.id,
+      tmuxTarget: isTmuxSession ? terminalSession?.id : undefined,
       jsonlPath: jsonlPath || undefined,
       claudeSessionId,
       status: 'idle',

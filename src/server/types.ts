@@ -12,6 +12,7 @@ export interface Session {
   projectName?: string;
   branch?: string;
   itermSessionId?: string;
+  tmuxTarget?: string;
   jsonlPath?: string;
   /** Claude session UUID (for resume) */
   claudeSessionId?: string;

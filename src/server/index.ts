@@ -410,6 +410,8 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<v
 
       if (session.type === 'spawned') {
         ptyManager.sendInput(msg.sessionId, msg.text);
+      } else if (session.tmuxTarget) {
+        await bridge.sendInput(session.tmuxTarget, msg.text);
       } else if (session.itermSessionId) {
         await bridge.sendInput(session.itermSessionId, msg.text);
       } else if (session.tty) {

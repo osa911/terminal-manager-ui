@@ -2,9 +2,11 @@ import { ITermSession } from './types';
 import { Platform } from './platform';
 import { ItermBridge } from './iterm-bridge';
 import { GenericBridge } from './generic-bridge';
+import { TmuxBridge } from './tmux-bridge';
+import { CompositeBridge } from './composite-bridge';
 
 export interface TerminalBridge {
-  /** Enumerate terminal sessions (iTerm2 only; returns [] on generic). */
+  /** Enumerate terminal sessions (iTerm2/tmux; returns [] on generic). */
   enumerateSessions(): Promise<ITermSession[]>;
 
   /** Read terminal content by TTY device path. */
@@ -24,8 +26,9 @@ export interface TerminalBridge {
 }
 
 export function createBridge(platform: Platform): TerminalBridge {
-  if (platform === 'darwin-iterm') {
-    return new ItermBridge();
-  }
-  return new GenericBridge();
+  const baseBridge = platform === 'darwin-iterm' ? new ItermBridge() : new GenericBridge();
+  // TmuxBridge listed first so it gets priority for tmux panes.
+  // When tmux isn't running, TmuxBridge.enumerateSessions() returns []
+  // and the composite falls through to the base bridge.
+  return new CompositeBridge(new TmuxBridge(), baseBridge);
 }
