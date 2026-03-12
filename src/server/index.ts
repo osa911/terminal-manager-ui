@@ -196,12 +196,32 @@ const app = express();
 app.use(express.json());
 
 // Auth endpoints (no auth required)
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
 app.post('/api/login', (req, res) => {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const record = loginAttempts.get(ip);
+
+  if (record && now < record.resetAt && record.count >= LOGIN_MAX_ATTEMPTS) {
+    const retryAfter = Math.ceil((record.resetAt - now) / 1000);
+    res.status(429).json({ error: 'Too many attempts. Try again later.', retryAfter });
+    return;
+  }
+
   const { password } = req.body;
   if (password !== AUTH_PASSWORD) {
+    const entry = record && now < record.resetAt
+      ? { count: record.count + 1, resetAt: record.resetAt }
+      : { count: 1, resetAt: now + LOGIN_WINDOW_MS };
+    loginAttempts.set(ip, entry);
     res.status(401).json({ error: 'Wrong password' });
     return;
   }
+
+  loginAttempts.delete(ip);
   res.setHeader('Set-Cookie', `tm_auth=${authToken()}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_MAX_AGE / 1000}`);
   res.json({ ok: true });
 });
@@ -250,8 +270,12 @@ app.post(
   '/api/upload-image',
   express.raw({ type: 'image/*', limit: '10mb' }),
   (req, res) => {
-    const contentType = req.headers['content-type'] || 'image/png';
-    const ext = IMAGE_EXT_MAP[contentType] ?? 'png';
+    const contentType = req.headers['content-type'] || '';
+    const ext = IMAGE_EXT_MAP[contentType];
+    if (!ext) {
+      res.status(400).json({ error: 'Unsupported image type' });
+      return;
+    }
     const filename = `screenshot-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
     const filePath = path.join(IMAGE_DIR, filename);
 
@@ -409,7 +433,10 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<v
       if (!session) break;
 
       if (session.type === 'spawned') {
-        ptyManager.sendInput(msg.sessionId, msg.text);
+        // Input-bar sends composed text; append \r so the PTY receives Enter.
+        // xterm.js terminal sends raw keystrokes that already include \r.
+        const data = msg.source === 'input-bar' ? msg.text + '\r' : msg.text;
+        ptyManager.sendInput(msg.sessionId, data);
       } else if (session.tmuxTarget) {
         await bridge.sendInput(session.tmuxTarget, msg.text);
       } else if (session.itermSessionId) {
@@ -625,8 +652,13 @@ async function start(): Promise<void> {
   bridge = createBridge(platform);
   console.log(`Platform: ${platform}, bridge: ${bridge.constructor.name}`);
 
-  server.listen(PORT, async () => {
-    console.log(`Terminal Manager running at http://localhost:${PORT}`);
+  if (AUTH_PASSWORD === 'admin') {
+    console.warn('\x1b[33m⚠  WARNING: Using default password "admin". Set TM_PASSWORD env var for security.\x1b[0m');
+  }
+
+  const HOST = process.env.TM_HOST || '127.0.0.1';
+  server.listen(PORT, HOST, async () => {
+    console.log(`Terminal Manager running at http://${HOST}:${PORT}`);
 
     jsonlWatcher.start();
     attentionDetector.start(() => sessions, bridge);

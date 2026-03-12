@@ -720,6 +720,26 @@ body {
   border-color: var(--accent);
 }
 
+#btn-attach-image {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 6px;
+  min-width: 36px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+#btn-attach-image:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* ── Buttons ── */
 .btn {
   padding: 8px 16px;

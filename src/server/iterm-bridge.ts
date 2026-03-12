@@ -123,8 +123,6 @@ export class ItermBridge implements TerminalBridge {
   async sendInputByTty(tty: string, text: string): Promise<boolean> {
     const ttyPath = ItermBridge.normalizeTtyPath(tty);
     const escaped = ItermBridge.escapeForAppleScript(text);
-    // iTerm2's "write text" appends \r which Claude Code's TUI ignores.
-    // Append explicit linefeed and use "newline NO" to send a proper \n.
     const script = `
       tell application "iTerm2"
         repeat with w in windows

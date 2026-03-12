@@ -653,7 +653,7 @@ async function sendInput(text: string): Promise<void> {
 
   if (!message) return;
 
-  send({ type: 'send-input', sessionId: selectedSessionId, text: message });
+  send({ type: 'send-input', sessionId: selectedSessionId, text: message, source: 'input-bar' });
   inputText.value = '';
   inputText.style.height = 'auto';
   inputDrafts.delete(selectedSessionId);
@@ -1012,6 +1012,25 @@ function init(): void {
       renderImagePreviews();
       break; // one image per paste event
     }
+  });
+
+  // Image attach button
+  const imageFileInput = $('image-file-input') as HTMLInputElement;
+  $('btn-attach-image').addEventListener('click', () => {
+    if (!isEditMode || !selectedSessionId) return;
+    imageFileInput.click();
+  });
+  imageFileInput.addEventListener('change', () => {
+    if (!selectedSessionId || !imageFileInput.files) return;
+    for (const file of imageFileInput.files) {
+      if (!file.type.startsWith('image/')) continue;
+      const objectUrl = URL.createObjectURL(file);
+      const list = imageDrafts.get(selectedSessionId) || [];
+      list.push({ file, objectUrl });
+      imageDrafts.set(selectedSessionId, list);
+    }
+    renderImagePreviews();
+    imageFileInput.value = ''; // reset so same file can be re-selected
   });
 
   // Back button (mobile)

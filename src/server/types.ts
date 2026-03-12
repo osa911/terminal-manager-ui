@@ -91,7 +91,7 @@ export type ServerMessage =
 
 // WebSocket messages: Client → Server
 export type ClientMessage =
-  | { type: 'send-input'; sessionId: string; text: string }
+  | { type: 'send-input'; sessionId: string; text: string; source?: 'terminal' | 'input-bar' }
   | { type: 'create-session'; cwd: string }
   | { type: 'subscribe'; sessionId: string }
   | { type: 'resize'; sessionId: string; cols: number; rows: number }
