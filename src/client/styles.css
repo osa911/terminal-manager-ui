@@ -990,7 +990,23 @@ textarea:disabled {
   font-size: 12px;
 }
 
-/* ── Resume / Terminate Buttons ── */
+/* ── Session Action Buttons ── */
+.btn-open-terminal {
+  padding: 6px 14px;
+  background: #7aa2f7;
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-open-terminal:hover {
+  background: #7dcfff;
+}
+
 .btn-resume {
   padding: 6px 14px;
   background: var(--green);

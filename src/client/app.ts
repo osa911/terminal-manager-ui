@@ -398,6 +398,15 @@ function updateSessionHeader(): void {
   // Update chat status bar
   updateChatStatusBar(session);
 
+  // Show/hide "Open in Terminal" button
+  const btnOpenTerminal = $('btn-open-terminal') as HTMLButtonElement;
+  if (!isSharedView && session.claudeSessionId && (session.type === 'spawned' || session.type === 'terminated')) {
+    btnOpenTerminal.classList.remove('hidden');
+    btnOpenTerminal.disabled = !isEditMode;
+  } else {
+    btnOpenTerminal.classList.add('hidden');
+  }
+
   // Show/hide resume button (hidden in share view)
   const btnResume = $('btn-resume') as HTMLButtonElement;
   if (!isSharedView && session.type === 'terminated' && session.claudeSessionId) {
@@ -505,6 +514,17 @@ function goBack(): void {
   sessionView.classList.add('hidden');
   emptyState.classList.remove('hidden');
   renderSessionList();
+}
+
+// ── Open in Terminal ──
+function openInTerminal(): void {
+  if (!selectedSessionId) return;
+  const session = sessions.find(s => s.id === selectedSessionId);
+  if (!session || !session.claudeSessionId) return;
+
+  send({ type: 'open-in-terminal', sessionId: selectedSessionId });
+  // Go back to session list since this session will disappear
+  goBack();
 }
 
 // ── Resume session ──
@@ -1036,7 +1056,8 @@ function init(): void {
   // Back button (mobile)
   $('btn-back').addEventListener('click', goBack);
 
-  // Resume button
+  // Session action buttons
+  $('btn-open-terminal').addEventListener('click', openInTerminal);
   $('btn-resume').addEventListener('click', resumeSession);
   $('btn-terminate').addEventListener('click', terminateSession);
 
@@ -1086,6 +1107,7 @@ async function initShareView(token: string): Promise<void> {
   // Hide all controls not available in shared view
   $('btn-new-session').classList.add('hidden');
   $('btn-share').classList.add('hidden');
+  $('btn-open-terminal').classList.add('hidden');
   $('btn-resume').classList.add('hidden');
   $('btn-terminate').classList.add('hidden');
   $('sidebar').classList.add('hidden');

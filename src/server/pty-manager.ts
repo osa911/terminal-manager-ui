@@ -16,7 +16,7 @@ export class PtyManager extends EventEmitter {
    */
   createSession(cwd: string): Session {
     const id = `pty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    return this.spawnClaude(id, cwd, []);
+    return this.spawnClaude(id, cwd, ['--dangerously-skip-permissions']);
   }
 
   /**
@@ -24,7 +24,7 @@ export class PtyManager extends EventEmitter {
    */
   resumeSession(claudeSessionId: string, cwd: string, originalSessionId: string): Session {
     const id = `resumed-${claudeSessionId.slice(0, 8)}-${Date.now()}`;
-    return this.spawnClaude(id, cwd, ['--resume', claudeSessionId], originalSessionId);
+    return this.spawnClaude(id, cwd, ['--resume', claudeSessionId, '--dangerously-skip-permissions'], originalSessionId);
   }
 
   private spawnClaude(id: string, cwd: string, args: string[], replacesSessionId?: string): Session {

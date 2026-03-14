@@ -97,4 +97,5 @@ export type ClientMessage =
   | { type: 'resize'; sessionId: string; cols: number; rows: number }
   | { type: 'resume-session'; sessionId: string }
   | { type: 'terminate-session'; sessionId: string }
-  | { type: 'rename-session'; sessionId: string; name: string };
+  | { type: 'rename-session'; sessionId: string; name: string }
+  | { type: 'open-in-terminal'; sessionId: string };

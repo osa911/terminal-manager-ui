@@ -5,7 +5,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as url from 'url';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Session, ClientMessage, ServerMessage, ChatMessage } from './types';
 import { discoverSessions, getProcessInfo } from './session-discovery';
@@ -539,7 +539,89 @@ async function handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<v
       broadcast({ type: 'sessions-update', sessions });
       break;
     }
+
+    case 'open-in-terminal': {
+      if (!canWrite(ws)) break;
+      const session = findSession(msg.sessionId);
+      if (!session || !session.claudeSessionId) break;
+
+      const claudeSessionId = session.claudeSessionId;
+      const cwd = session.cwd || process.env.HOME || '/tmp';
+
+      // Kill the spawned PTY if it's one of ours
+      if (session.type === 'spawned') {
+        ptyManager.killSession(msg.sessionId);
+        session.status = 'dead';
+      } else if (session.type === 'discovered' && session.pid) {
+        try { process.kill(session.pid, 'SIGTERM'); } catch {}
+        session.status = 'dead';
+      }
+
+      // Remove the session from the list (it will reappear as discovered)
+      const idx = sessions.indexOf(session);
+      if (idx !== -1) sessions.splice(idx, 1);
+      broadcast({ type: 'sessions-update', sessions });
+
+      // Open in real terminal
+      openInTerminal(claudeSessionId, cwd);
+      break;
+    }
   }
+}
+
+async function openInTerminal(claudeSessionId: string, cwd: string): Promise<void> {
+  const claudePath = process.env.CLAUDE_PATH || path.join(process.env.HOME || '~', '.local', 'bin', 'claude');
+  const command = `cd ${shellEscape(cwd)} && ${shellEscape(claudePath)} --resume ${shellEscape(claudeSessionId)} --dangerously-skip-permissions`;
+
+  const platform = await detectPlatform();
+
+  if (platform === 'darwin-iterm') {
+    // Open in iTerm2 — create window then write command to the session
+    const script = `
+      tell application "iTerm"
+        activate
+        set newWindow to (create window with default profile)
+        tell current session of newWindow
+          write text "${command.replace(/"/g, '\\"')}"
+        end tell
+      end tell
+    `;
+    execFile('osascript', ['-e', script], (err) => {
+      if (err) console.error('Failed to open iTerm2:', err);
+    });
+  } else if (platform === 'darwin') {
+    // Open in Terminal.app
+    const script = `
+      tell application "Terminal"
+        activate
+        do script "${command.replace(/"/g, '\\"')}"
+      end tell
+    `;
+    execFile('osascript', ['-e', script], (err) => {
+      if (err) console.error('Failed to open Terminal.app:', err);
+    });
+  } else {
+    // Linux: try common terminal emulators
+    const terminals = ['gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm'];
+    for (const term of terminals) {
+      try {
+        if (term === 'gnome-terminal') {
+          execFile(term, ['--', 'bash', '-c', command], { cwd });
+        } else if (term === 'konsole') {
+          execFile(term, ['-e', 'bash', '-c', command], { cwd });
+        } else {
+          execFile(term, ['-e', `bash -c '${command.replace(/'/g, "'\\''")}'`], { cwd });
+        }
+        break;
+      } catch {
+        continue;
+      }
+    }
+  }
+}
+
+function shellEscape(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
 function findSession(id: string): Session | undefined {
